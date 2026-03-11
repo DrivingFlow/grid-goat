@@ -1,0 +1,12 @@
+__pycache__/
+train/__pycache__/
+.vscode/
+bags/
+results/
+wandb/
+data/
+train/ckpts/
+.DS_Store
+.conda/
+_temp_*.py
+*.pyc
