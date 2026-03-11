@@ -8,5 +8,4 @@ data/
 train/ckpts/
 .DS_Store
 .conda/
-_temp_*.py
 *.pyc

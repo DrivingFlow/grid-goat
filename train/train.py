@@ -3,7 +3,7 @@ import os
 import torch
 import numpy as np
 import cv2
-from torch.utils.data import random_split
+from torch.utils.data import random_split, ConcatDataset
 from tqdm import tqdm
 import wandb
 
@@ -11,14 +11,14 @@ from GridFormer import GridFormer
 from MapDataset import MapDataset
 
 PIXEL_ERROR_THRESHOLD = 0.5
-POS_WEIGHT = 4.0
+POS_WEIGHT = 6.0
 DICE_WEIGHT = 0.5
 BCE_WEIGHT = 0.5
-MOTION_WEIGHT = 0.3
-MOTION_BCE_BOOST = 4.0
+MOTION_WEIGHT = 0.5
+MOTION_BCE_BOOST = 10.0
 MOTION_MASK_THRESHOLD = 0.05
 TEACHER_FORCING_START = 1.0
-TEACHER_FORCING_END = 0.2
+TEACHER_FORCING_END = 0.0
 
 
 def make_arith_weights(n, device, a=0.3, b=0.1):
@@ -59,7 +59,7 @@ def frame_loss(pred, target, pos_weight_val, motion_mask=None, motion_boost=MOTI
 
 
 def loss_fn(y_pred, y_true, x_hist, device, return_components=False):
-    weights = make_arith_weights(y_pred.shape[1], device)
+    weights = make_arith_weights(y_pred.shape[1], device, a=0.2, b=0.2)
     true_delta, pred_delta, motion_mask = build_motion_targets(y_pred, y_true, x_hist)
 
     occ_losses = []
@@ -148,7 +148,7 @@ def export_test_predictions(model, test_set, device, output_dir):
     print(f"Saved {len(test_set)} test samples to {output_dir}")
 
 
-def train(n_epochs, data_root, resume_from=None):
+def train(n_epochs, data_roots, resume_from=None, ckpt_path=None, save_results=False, results_name=None):
 
     if torch.cuda.is_available():
         device = "cuda"
@@ -159,13 +159,18 @@ def train(n_epochs, data_root, resume_from=None):
 
     wandb.init(project="occupancy-grid-prediction", config={
         "epochs": n_epochs,
-        "data_root": data_root,
+        "data_roots": data_roots,
         "device": device,
     })
 
-    dataset = MapDataset(root=data_root, T=5, F=5)
-    grid_h, grid_w = dataset.H, dataset.W
-    print(f"Dataset: {len(dataset)} sets, grid size {grid_h}x{grid_w}")
+    if isinstance(data_roots, str):
+        data_roots = [data_roots]
+
+    datasets = [MapDataset(root=r, T=5, F=5) for r in data_roots]
+    dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+    grid_h, grid_w = datasets[0].H, datasets[0].W
+    motion_dim = datasets[0].motion_dim
+    print(f"Dataset: {len(dataset)} sets from {len(data_roots)} folder(s), grid size {grid_h}x{grid_w}")
 
     n = len(dataset)
     n_train = int(0.7 * n)
@@ -191,13 +196,18 @@ def train(n_epochs, data_root, resume_from=None):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ckpt_dir = os.path.join(script_dir, "ckpts")
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_model_path = os.path.join(ckpt_dir, "best_model.pth")
+    if ckpt_path is None:
+        best_model_path = os.path.join(ckpt_dir, "model.pth")
+    else:
+        best_model_path = ckpt_path
+        os.makedirs(os.path.dirname(os.path.abspath(best_model_path)), exist_ok=True)
     results_root = os.path.join(script_dir, "..", "results")
-    results_dir = os.path.join(results_root, os.path.basename(os.path.normpath(data_root)))
+    default_name = "_".join(os.path.basename(os.path.normpath(r)) for r in data_roots)
+    results_dir = os.path.join(results_root, results_name if results_name else default_name)
 
     model = GridFormer(
         grid_h=grid_h, grid_w=grid_w,
-        motion_dim=dataset.motion_dim,
+        motion_dim=motion_dim,
     )
 
     if resume_from and os.path.exists(resume_from):
@@ -340,10 +350,11 @@ def train(n_epochs, data_root, resume_from=None):
     best_state = torch.load(best_model_path, map_location="cpu")
     model.load_state_dict(best_state)
     model.to(device)
-    export_test_predictions(model, test_set, device, results_dir)
+    if save_results:
+        export_test_predictions(model, test_set, device, results_dir)
+        print(f"Test predictions saved to: {results_dir}")
 
     print(f"\nTraining complete. Best model: {best_model_path}")
-    print(f"Test predictions saved to: {results_dir}")
     wandb.finish()
 
 
@@ -353,13 +364,19 @@ if __name__ == "__main__":
     default_root = os.path.join(script_dir, "..", "data", "2026-03-04_data2")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default=default_root, help="Path to data root")
+    parser.add_argument("--data", nargs="+", default=[default_root], help="One or more data folder paths")
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
     parser.add_argument("--resume", default=None, help="Path to pretrained .pth to resume from")
+    parser.add_argument("--ckpt", default=None, help="Path to save best model checkpoint (default: train/ckpts/model.pth)")
+    parser.add_argument("--save-results", action="store_true", help="Save test predictions to results folder after training")
+    parser.add_argument("--results-name", default=None, help="Name of the results subfolder (default: data folder name(s))")
 
     args = parser.parse_args()
     train(
         n_epochs=args.epochs,
-        data_root=args.data,
+        data_roots=args.data,
         resume_from=args.resume,
+        ckpt_path=args.ckpt,
+        save_results=args.save_results,
+        results_name=args.results_name,
     )
