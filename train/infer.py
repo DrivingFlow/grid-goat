@@ -14,7 +14,7 @@ import numpy as np
 import cv2
 import torch
 
-from TransformerModel import TransformerModel
+from GridFormer import GridFormer
 from MapDataset import MapDataset
 
 PIXEL_THRESHOLD = 0.5
@@ -46,7 +46,7 @@ def main():
     dataset = MapDataset(root=args.data, T=5, F=5)
     print(f"Dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
 
-    model = TransformerModel(
+    model = GridFormer(
         grid_h=dataset.H,
         grid_w=dataset.W,
         motion_dim=dataset.motion_dim,

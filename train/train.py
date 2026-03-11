@@ -7,7 +7,7 @@ from torch.utils.data import random_split
 from tqdm import tqdm
 import wandb
 
-from TransformerModel import TransformerModel
+from GridFormer import GridFormer
 from MapDataset import MapDataset
 
 PIXEL_ERROR_THRESHOLD = 0.5
@@ -195,7 +195,7 @@ def train(n_epochs, data_root, resume_from=None):
     results_root = os.path.join(script_dir, "..", "results")
     results_dir = os.path.join(results_root, os.path.basename(os.path.normpath(data_root)))
 
-    model = TransformerModel(
+    model = GridFormer(
         grid_h=grid_h, grid_w=grid_w,
         motion_dim=dataset.motion_dim,
     )

@@ -27,7 +27,7 @@ def _dec_block(in_ch, out_ch, last=False):
     )
 
 
-class TransformerModel(nn.Module):
+class GridFormer(nn.Module):
     """
     U-Net style CNN + Transformer encoder-decoder for occupancy grid prediction.
 

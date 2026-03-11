@@ -17,12 +17,10 @@ The pipeline has three stages:
 ├── lidar_vis.py               # Real-time LiDAR + occupancy grid playback viewer
 ├── pcd_bag_conversion.py      # Bag → occupancy grid PNGs / video
 ├── train/
-│   ├── TransformerModel.py    # U-Net CNN encoder-decoder + Transformer model
+│   ├── GridFormer.py          # U-Net CNN encoder-decoder + Transformer model
 │   ├── MapDataset.py          # PyTorch dataset for loading .npz training samples
 │   ├── train.py               # Training script (BCE + Dice loss, WandB logging)
-│   ├── infer.py               # Inference visualization with ensemble overlays
-│   ├── EncoderMLPModel.py     # Alternative encoder-MLP architecture
-│   └── train_encoder_mlp.py   # Training script for encoder-MLP model
+│   └── infer.py               # Inference visualization with ensemble overlays
 ├── data/                      # Generated training data (.npz files)
 ├── bags/                      # ROS2 bag recordings
 └── results/                   # Saved inference output images
@@ -48,7 +46,7 @@ cd train
 python train.py
 ```
 
-Trains a `TransformerModel` with:
+Trains a `GridFormer` model with:
 - CNN encoder (U-Net style with skip connections) to embed occupancy grids
 - Transformer encoder-decoder for temporal sequence modeling
 - Autoregressive decoding with teacher forcing
