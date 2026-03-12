@@ -9,6 +9,7 @@ Usage:
 import os
 import sys
 import argparse
+import time
 
 import numpy as np
 import cv2
@@ -79,7 +80,13 @@ def main():
 
             with torch.no_grad():
                 with torch.autocast(device, dtype=autocast_dtype, enabled=use_amp):
+                    t0 = time.perf_counter()
                     Y_pred = model(X_grids, X_motion)
+                    if device == "mps":
+                        torch.mps.synchronize()
+                    elif device == "cuda":
+                        torch.cuda.synchronize()
+                    infer_ms = (time.perf_counter() - t0) * 1000
 
             pred_np = Y_pred[0].cpu().float().numpy()   # (F, 1, H, W)
             true_np = Y.numpy()                          # (F, 1, H, W)
@@ -199,12 +206,13 @@ def main():
             cv2.putText(canvas, "Comparison (G=TP R=FP B=FN)", (5, 4 * cell_h + 20), font, 0.6, (255, 255, 255), 1)
 
             cache[idx] = canvas
+            cache[(idx, 'ms')] = infer_ms
 
             if args.save:
                 cv2.imwrite(os.path.join(args.save, f"sample_{idx:04d}.png"), canvas)
 
         cv2.imshow("Inference", cache[idx])
-        print(f"Sample {idx+1}/{len(dataset)} — right/any=next, left=prev, q=quit")
+        print(f"Sample {idx+1}/{len(dataset)} | inference: {cache[(idx, 'ms')]:.1f} ms — right/any=next, left=prev, q=quit")
         key = cv2.waitKey(0) & 0xFF
         if key == ord('q') or key == 27:
             break
