@@ -2,20 +2,19 @@
 """
 Generate training data for occupancy-grid prediction from a ROS2 bag.
 
-For each sliding window of (N_INPUT + N_TARGET) consecutive LiDAR scans:
-    - Input frames  (1..N_INPUT): ego-centric grids, each centered on the
-        agent's own pose at that timestep.
-    - Target frames (N_INPUT+1 .. N_INPUT+N_TARGET): grids centered on the
-        agent's pose at the *last input frame* (the anchor), so the model
-        learns to predict what the world looks like from the anchor's viewpoint.
+Usage:
+    python save_frame.py /path/to/bag_folder [--mode {ego,map}]
 
-Output layout:
-    data/<bag_name>/
-        set000000.npz
-        set000001.npz
-        ...
+Transform modes:
+  ego  (default)  Each input frame is in its own yaw-aligned ego frame. Target frames
+                  are re-projected into the last input frame's reference frame (the anchor),
+                  so the model learns to predict what the world looks like from a fixed viewpoint.
+                  Output saved to data/ego/<bag_name>/.
+  map             Each frame uses rotation-only transform (north-up, origin-centred on the
+                  sensor). No anchor re-projection; input and target are each in their own
+                  sensor frame. Output saved to data/map/<bag_name>/.
 
-Each .npz file contains:
+For each sliding window of (N_INPUT + N_TARGET) consecutive LiDAR scans, each .npz contains:
     - x_grids:  (N_INPUT, 2, H, W) float32
             channel 0 = occupancy in [0, 1]
             channel 1 = delta occupancy in [-1, 1]
@@ -23,9 +22,6 @@ Each .npz file contains:
             column 0 = forward speed in m/s
             column 1 = yaw rate in rad/s
     - y:        (N_TARGET, 1, H, W) float32 occupancy in [0, 1]
-
-Usage:
-    python save_frame.py /path/to/bag_folder
 """
 
 from __future__ import annotations

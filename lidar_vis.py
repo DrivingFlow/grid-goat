@@ -3,12 +3,18 @@
 View PointCloud2 messages from a ROS2 bag (rosbag2) on macOS without ROS2.
 
 Usage:
-  python view_livox_bag.py /path/to/bag_folder
+  python lidar_vis.py /path/to/bag_folder [--mode {map,ego}]
+
+Transform modes:
+  map  (default)  Rotation-only: each frame is rotated into a north-up orientation
+                  but stays origin-centred on the sensor. Equivalent to xyz @ R.T.
+  ego             Yaw-aligned: applies full rotation then re-aligns to yaw-only heading.
+                  Equivalent to xyz @ R.T @ R_yaw.
 
 Notes:
 - bag_folder should contain metadata.yaml and one or more *.db3 files (typical rosbag2).
-- Visualizes topic: /livox/lidar
-- Tries to read x,y,z (float32) fields; ignores other fields.
+- Visualizes topic: /livox/lidar with pose from /pcl_pose.
+- Space to pause/resume, Q or Esc to quit.
 """
 
 from __future__ import annotations
