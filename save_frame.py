@@ -30,6 +30,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 import numpy as np
@@ -266,16 +267,27 @@ def build_motion_features(
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python save_frame.py /path/to/bag_folder", file=sys.stderr)
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description="Generate training data from a ROS2 bag.")
+    parser.add_argument("bag", help="Path to bag folder")
+    parser.add_argument(
+        "--mode",
+        choices=["map", "ego"],
+        default="ego",
+        help=(
+            "Transform mode: "
+            "'ego' (default) anchors all frames to the last input frame's yaw-aligned pose; "
+            "'map' keeps each frame rotation-only (north-up, no position offset)."
+        ),
+    )
+    args = parser.parse_args()
 
-    bag_dir = Path(sys.argv[1]).expanduser().resolve()
+    bag_dir = Path(args.bag).expanduser().resolve()
+    mode = args.mode
     if not bag_dir.exists():
         print(f"Bag path does not exist: {bag_dir}", file=sys.stderr)
         sys.exit(2)
 
-    output_dir = Path("data") / bag_dir.name
+    output_dir = Path("data") / mode / bag_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     window_size = (N_INPUT + N_TARGET - 1) * FRAME_SKIP + 1
@@ -372,10 +384,13 @@ def main():
             for j in range(N_INPUT):
                 scan_idx = i + j * FRAME_SKIP
                 xyz_world, trans, rot_yaw, scan_t_ns, yaw = scans[scan_idx]
-                xyz_ego = world_to_anchor_frame(xyz_world, trans, rot_yaw)
-                d2 = np.sum(xyz_ego[:, :2] ** 2, axis=1)
-                xyz_ego = xyz_ego[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                grid = ego_scan_to_grid(xyz_ego, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                if mode == "map":
+                    xyz_frame = xyz_world - trans  # rotation-only: xyz @ rot.T
+                else:
+                    xyz_frame = world_to_anchor_frame(xyz_world, trans, rot_yaw)
+                d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
+                xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
+                grid = ego_scan_to_grid(xyz_frame, EGO_RADIUS_M, GRID_RES, Z_RANGE)
                 input_occupancy.append((grid > 0).astype(np.float32))
 
                 if j > 0:
@@ -395,11 +410,14 @@ def main():
 
             for j in range(N_TARGET):
                 scan_idx = i + (N_INPUT + j) * FRAME_SKIP
-                xyz_world, _trans, _rot_yaw, _time_ns, _yaw = scans[scan_idx]
-                xyz_anchor = world_to_anchor_frame(xyz_world, anchor_trans, anchor_rot_yaw)
-                d2 = np.sum(xyz_anchor[:, :2] ** 2, axis=1)
-                xyz_anchor = xyz_anchor[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                grid = ego_scan_to_grid(xyz_anchor, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
+                if mode == "map":
+                    xyz_frame = xyz_world - trans_j  # rotation-only: xyz @ rot.T
+                else:
+                    xyz_frame = world_to_anchor_frame(xyz_world, anchor_trans, anchor_rot_yaw)
+                d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
+                xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
+                grid = ego_scan_to_grid(xyz_frame, EGO_RADIUS_M, GRID_RES, Z_RANGE)
                 target_occupancy.append((grid > 0).astype(np.float32))
 
             x_occ = np.stack(input_occupancy, axis=0)

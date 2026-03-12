@@ -13,6 +13,7 @@ Notes:
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -194,11 +195,22 @@ def pointcloud2_to_xyz(msg) -> np.ndarray:
     return xyz[mask]
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python view_livox_bag.py /path/to/bag_folder", file=sys.stderr)
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description="ROS2 bag PointCloud2 viewer")
+    parser.add_argument("bag", help="Path to bag folder")
+    parser.add_argument(
+        "--mode",
+        choices=["map", "ego"],
+        default="map",
+        help=(
+            "Point cloud transform mode: "
+            "'map' applies the full rotation only (origin-centred); "
+            "'ego' applies full rotation then re-aligns to yaw-only (heading-corrected)."
+        ),
+    )
+    args = parser.parse_args()
 
-    bag_dir = Path(sys.argv[1]).expanduser().resolve()
+    bag_dir = Path(args.bag).expanduser().resolve()
+    mode = args.mode
     if not bag_dir.exists():
         print(f"Bag path does not exist: {bag_dir}", file=sys.stderr)
         sys.exit(2)
@@ -215,6 +227,7 @@ def main():
     vis.create_window(window_name=f"ROS2 bag PointCloud2 viewer ({TOPIC})", width=2000, height=1000)
     pcd = o3d.geometry.PointCloud()
     axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+    axes_verts_init = np.asarray(axes.vertices).copy()
     added = False
     state = {"paused": False}
 
@@ -348,11 +361,19 @@ def main():
                     best_idx = left_idx if left_dt <= right_dt else right_idx
 
                 rot, trans = pose_transforms[best_idx]
-                xyz_world = (xyz @ rot.T) + trans
-                rot_yaw = yaw_only_rotation_matrix(rot)
 
-                # Ego-centered and leveled: keep yaw, remove roll/pitch tilt.
-                xyz = (xyz_world - trans) @ rot_yaw
+                if mode == "ego":
+                    # Full rotation into world frame, then re-align to yaw only
+                    rot_yaw = yaw_only_rotation_matrix(rot)
+                    xyz = xyz @ rot.T @ rot_yaw
+                    verts_rot = axes_verts_init @ rot.T @ rot_yaw
+                else:
+                    # Rotation only (origin-centred)
+                    xyz = xyz @ rot.T
+                    verts_rot = axes_verts_init @ rot.T
+
+                # Apply same transform to axes
+                axes.vertices = o3d.utility.Vector3dVector(verts_rot)
 
                 # Generate 2D occupancy grid
                 grid = ego_scan_to_grid(xyz, EGO_RADIUS_M, GRID_RES, Z_RANGE)
@@ -383,6 +404,7 @@ def main():
                     render_opt.background_color = np.array([0.2, 0.2, 0.2], dtype=np.float64)
                 else:
                     vis.update_geometry(pcd)
+                    vis.update_geometry(axes)
 
                 if not vis.poll_events():
                     should_exit = True
