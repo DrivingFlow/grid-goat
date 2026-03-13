@@ -7,11 +7,12 @@ Usage:
 
 Transform modes:
   ego  (default)  Each input frame is in its own yaw-aligned ego frame. Target frames
-                  are re-projected into the last input frame's reference frame (the anchor),
-                  so the model learns to predict what the world looks like from a fixed viewpoint.
-                  Output saved to data/ego/<bag_name>/.
-  map             Each frame uses rotation-only transform (north-up, origin-centred on the
-                  sensor). No anchor re-projection; input and target are each in their own
+                  are re-projected into the last input frame's reference frame (anchor-centred,
+                  yaw-aligned), so the model learns to predict what the world looks like
+                  from a fixed viewpoint. Output saved to data/ego/<bag_name>/.
+  map             Same anchor-centred positioning as ego, but north-up (no yaw rotation).
+                  Input frames are centred on their own pose; target frames are centred on
+                  the anchor. Output saved to data/map/<bag_name>/.
                   sensor frame. Output saved to data/map/<bag_name>/.
 
 For each sliding window of (N_INPUT + N_TARGET) consecutive LiDAR scans, each .npz contains:

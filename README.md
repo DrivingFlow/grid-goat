@@ -41,8 +41,8 @@ python save_frame.py /path/to/bag_folder --mode map
 Processes a ROS2 bag containing `/livox/lidar` (PointCloud2) and `/pcl_pose` topics. Uses a sliding window over consecutive scans (every 5th scan) to produce training samples.
 
 **Transform modes:**
-- `ego` (default): each input frame is in its own yaw-aligned ego frame; target frames are re-projected into the last input frame's reference frame. Output saved to `data/ego/<bag_name>/`.
-- `map`: each frame uses rotation-only transform (north-up, origin-centred on the sensor). No anchor re-projection. Output saved to `data/map/<bag_name>/`.
+- `ego` (default): each input frame is in its own yaw-aligned ego frame; target frames are re-projected into the last input frame's reference frame (anchor-centred, yaw-aligned). Output saved to `data/ego/<bag_name>/`.
+- `map`: same anchor-centred positioning as ego, but north-up (no yaw rotation applied). Input frames are centred on their own pose; target frames are centred on the anchor. Output saved to `data/map/<bag_name>/`.
 
 Each sample contains:
 - **Input**: 5 occupancy grids (201×201, 5cm resolution, 5m radius) with occupancy + delta channels, plus forward speed and yaw rate
