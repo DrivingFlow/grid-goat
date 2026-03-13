@@ -36,7 +36,7 @@ POSE_TOPIC = "/pcl_pose"
 EGO_RADIUS_M = 5.0
 PLAYBACK_SPEED = 4.0
 
-Z_RANGE = (0.03, 0.6)
+Z_RANGE = (0.1, 1.0)
 GRID_RES = 0.05
 
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
@@ -381,8 +381,13 @@ def main():
                 # Apply same transform to axes
                 axes.vertices = o3d.utility.Vector3dVector(verts_rot)
 
+                # Restore world-frame z so Z_RANGE is relative to the ground plane,
+                # not the sensor height. x/y stay ego-centred for the grid.
+                xyz_grid = xyz.copy()
+                xyz_grid[:, 2] += trans[2]
+
                 # Generate 2D occupancy grid
-                grid = ego_scan_to_grid(xyz, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
                 
                 # Visualize 2D occupancy grid with OpenCV
                 vis_grid = cv2.resize(grid, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_NEAREST)

@@ -386,7 +386,10 @@ def main():
                     xyz_frame = world_to_anchor_frame(xyz_world, trans, rot_yaw)
                 d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
                 xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                grid = ego_scan_to_grid(xyz_frame, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                # Restore world-frame z so Z_RANGE is ground-relative, not sensor-relative
+                xyz_grid = xyz_frame.copy()
+                xyz_grid[:, 2] += trans[2]
+                grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
                 input_occupancy.append((grid > 0).astype(np.float32))
 
                 if j > 0:
@@ -408,12 +411,16 @@ def main():
                 scan_idx = i + (N_INPUT + j) * FRAME_SKIP
                 xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
                 if mode == "map":
-                    xyz_frame = xyz_world - trans_j  # rotation-only: xyz @ rot.T
+                    # Anchor to last input frame position, keep north-up orientation
+                    xyz_frame = xyz_world - anchor_trans
                 else:
                     xyz_frame = world_to_anchor_frame(xyz_world, anchor_trans, anchor_rot_yaw)
                 d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
                 xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                grid = ego_scan_to_grid(xyz_frame, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                # Restore world-frame z so Z_RANGE is ground-relative, not sensor-relative
+                xyz_grid = xyz_frame.copy()
+                xyz_grid[:, 2] += anchor_trans[2]
+                grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
                 target_occupancy.append((grid > 0).astype(np.float32))
 
             x_occ = np.stack(input_occupancy, axis=0)
