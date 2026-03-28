@@ -186,11 +186,11 @@ def train(n_epochs, data_roots, resume_from=None, ckpt_path=None, save_results=F
     pin = device == "cuda"
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=16, shuffle=True, drop_last=True,
-        num_workers=2, pin_memory=pin,
+        num_workers=6, pin_memory=pin,
     )
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=16, shuffle=False, drop_last=False,
-        num_workers=2, pin_memory=pin,
+        num_workers=6, pin_memory=pin,
     )
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

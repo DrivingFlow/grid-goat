@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+Benchmark a trained GridFormer checkpoint on a held-out dataset.
+
+Reports per-frame L2 error (RMSE), IoU, precision, recall and overall
+summary statistics.  Produces bar + box plots of per-frame metrics.
+
+Usage:
+  python train/benchmark.py --data data/ego/<benchmark_folder> --ckpt train/ckpts/model.pth (single model)
+  python train/benchmark.py --data data/ego/<benchmark_folder> --ckpt train/ckpts/a.pth train/ckpts/b.pth (multiple models)
+"""
+
+import argparse
+import os
+import sys
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from GridFormer import GridFormer
+from MapDataset import MapDataset
+
+PIXEL_THRESHOLD = 0.5
+
+
+# ── metric helpers ──────────────────────────────────────────────────────
+
+def frame_l2(pred: np.ndarray, gt: np.ndarray) -> float:
+    """Per-pixel RMSE between predicted probability map and binary GT."""
+    return float(np.sqrt(np.mean((pred - gt) ** 2)))
+
+
+def frame_iou(pred_bin: np.ndarray, gt_bin: np.ndarray) -> float:
+    inter = float(np.logical_and(pred_bin, gt_bin).sum())
+    union = float(np.logical_or(pred_bin, gt_bin).sum())
+    return inter / union if union > 0 else 1.0
+
+
+def frame_precision_recall(pred_bin: np.ndarray, gt_bin: np.ndarray):
+    tp = float(np.logical_and(pred_bin, gt_bin).sum())
+    fp = float(np.logical_and(pred_bin, ~gt_bin).sum())
+    fn = float(np.logical_and(~pred_bin, gt_bin).sum())
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+    rec = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+    return prec, rec
+
+
+# ── evaluation ──────────────────────────────────────────────────────────
+
+BATCH_SIZE = 32
+
+
+def evaluate(ckpt_path: str, dataset: MapDataset, device: str):
+    """Run inference on *dataset* with a single checkpoint. Returns metrics dict."""
+    model = GridFormer(
+        grid_h=dataset.H,
+        grid_w=dataset.W,
+        motion_dim=dataset.motion_dim,
+    )
+    state = torch.load(ckpt_path, map_location="cpu")
+    model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+
+    use_amp = device in ("cuda", "mps")
+    autocast_dtype = torch.float16 if device == "cuda" else torch.bfloat16
+
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False,
+                        num_workers=4, pin_memory=(device == "cuda"),
+                        persistent_workers=True)
+
+    n_future = dataset.F
+    n_samples = len(dataset)
+
+    # (n_samples, n_future)
+    l2_all = np.zeros((n_samples, n_future), dtype=np.float64)
+    iou_all = np.zeros_like(l2_all)
+    prec_all = np.zeros_like(l2_all)
+    rec_all = np.zeros_like(l2_all)
+
+    row = 0
+    for X_grids, X_motion, Y in tqdm(loader, desc="Evaluating", unit="batch"):
+        X_grids = X_grids.to(device)
+        X_motion = X_motion.to(device)
+        bs = X_grids.shape[0]
+
+        with torch.no_grad():
+            with torch.autocast(device, dtype=autocast_dtype, enabled=use_amp):
+                Y_pred = model(X_grids, X_motion)
+
+        pred_np = Y_pred.cpu().float().numpy()  # (B, F, 1, H, W)
+        true_np = Y.numpy()                      # (B, F, 1, H, W)
+
+        for b in range(bs):
+            for f in range(n_future):
+                p = pred_np[b, f, 0]
+                g = true_np[b, f, 0]
+                p_bin = p > PIXEL_THRESHOLD
+                g_bin = g > PIXEL_THRESHOLD
+
+                l2_all[row, f] = frame_l2(p, g)
+                iou_all[row, f] = frame_iou(p_bin, g_bin)
+                prec_all[row, f], rec_all[row, f] = frame_precision_recall(p_bin, g_bin)
+            row += 1
+
+    return {
+        "l2": l2_all,
+        "iou": iou_all,
+        "precision": prec_all,
+        "recall": rec_all,
+    }
+
+
+# ── plotting ────────────────────────────────────────────────────────────
+
+def plot_single(metrics: dict, ckpt_name: str, n_future: int, save_dir: str | None):
+    """Bar + box plots for a single checkpoint."""
+    frames = np.arange(1, n_future + 1)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig.suptitle(f"Benchmark – {ckpt_name}", fontsize=14)
+
+    titles = ["L2 (RMSE)", "IoU", "Precision", "Recall"]
+    keys = ["l2", "iou", "precision", "recall"]
+
+    for ax, title, key in zip(axes.flat, titles, keys):
+        data = metrics[key]  # (n_samples, n_future)
+        means = data.mean(axis=0)
+        stds = data.std(axis=0)
+
+        ax.bar(frames, means, yerr=stds, capsize=4, alpha=0.7, color="steelblue")
+        ax.set_xlabel("Future Frame")
+        ax.set_ylabel(title)
+        ax.set_title(title)
+        ax.set_xticks(frames)
+
+    plt.tight_layout()
+    if save_dir:
+        path = os.path.join(save_dir, f"benchmark_{ckpt_name}.png")
+        fig.savefig(path, dpi=150)
+        print(f"Saved plot: {path}")
+    plt.show()
+
+
+def plot_comparison(all_results: dict, n_future: int, save_dir: str | None):
+    """Grouped bar chart comparing multiple checkpoints."""
+    names = list(all_results.keys())
+    n_ckpts = len(names)
+    frames = np.arange(1, n_future + 1)
+    width = 0.8 / n_ckpts
+    colors = plt.cm.tab10(np.linspace(0, 1, n_ckpts))
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Checkpoint Comparison", fontsize=14)
+
+    titles = ["L2 (RMSE) ↓", "IoU ↑", "Precision ↑", "Recall ↑"]
+    keys = ["l2", "iou", "precision", "recall"]
+
+    for ax, title, key in zip(axes.flat, titles, keys):
+        for j, name in enumerate(names):
+            data = all_results[name][key]
+            means = data.mean(axis=0)
+            offset = (j - n_ckpts / 2 + 0.5) * width
+            ax.bar(frames + offset, means, width, label=name, color=colors[j], alpha=0.8)
+
+        ax.set_xlabel("Future Frame")
+        ax.set_ylabel(key.upper())
+        ax.set_title(title)
+        ax.set_xticks(frames)
+        ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    if save_dir:
+        path = os.path.join(save_dir, "benchmark_comparison.png")
+        fig.savefig(path, dpi=150)
+        print(f"Saved comparison plot: {path}")
+    plt.show()
+
+
+# ── main ────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark GridFormer checkpoints")
+    parser.add_argument("--data", required=True, help="Path to benchmark data folder")
+    parser.add_argument("--ckpt", required=True, nargs="+", help="One or more checkpoint paths")
+    parser.add_argument("--save", default=None, help="Directory to save plots (optional)")
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.data):
+        print(f"Data folder not found: {args.data}", file=sys.stderr)
+        sys.exit(1)
+    for c in args.ckpt:
+        if not os.path.isfile(c):
+            print(f"Checkpoint not found: {c}", file=sys.stderr)
+            sys.exit(1)
+
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    print(f"Device: {device}")
+
+    dataset = MapDataset(root=args.data, T=5, F=5)
+    print(f"Benchmark dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
+
+    if args.save:
+        os.makedirs(args.save, exist_ok=True)
+
+    all_results = {}
+
+    for ckpt_path in args.ckpt:
+        ckpt_name = os.path.splitext(os.path.basename(ckpt_path))[0]
+        print(f"\n{'='*60}")
+        print(f"Evaluating: {ckpt_name}")
+        print(f"{'='*60}")
+
+        metrics = evaluate(ckpt_path, dataset, device)
+        all_results[ckpt_name] = metrics
+
+        n_future = metrics["l2"].shape[1]
+
+        # Print per-frame table
+        print(f"\n{'Frame':<8} {'L2 (RMSE)':<14} {'IoU':<10} {'Precision':<12} {'Recall':<10}")
+        print("-" * 54)
+        for f in range(n_future):
+            l2_mean = metrics["l2"][:, f].mean()
+            iou_mean = metrics["iou"][:, f].mean()
+            prec_mean = metrics["precision"][:, f].mean()
+            rec_mean = metrics["recall"][:, f].mean()
+            print(f"  {f+1:<6} {l2_mean:<14.6f} {iou_mean:<10.4f} {prec_mean:<12.4f} {rec_mean:<10.4f}")
+
+        # Print summary
+        print(f"\n{'Overall':<8} {metrics['l2'].mean():<14.6f} {metrics['iou'].mean():<10.4f} "
+              f"{metrics['precision'].mean():<12.4f} {metrics['recall'].mean():<10.4f}")
+
+        if len(args.ckpt) == 1:
+            plot_single(metrics, ckpt_name, n_future, args.save)
+
+    if len(args.ckpt) > 1:
+        plot_comparison(all_results, n_future, args.save)
+
+
+if __name__ == "__main__":
+    main()
