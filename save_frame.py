@@ -3,7 +3,7 @@
 Generate training data for occupancy-grid prediction from a ROS2 bag.
 
 Usage:
-    python save_frame.py /path/to/bag_folder [--mode {ego,map}]
+    python save_frame.py /path/to/bag_folder [--mode {ego,map}] [--stride N]
 
 Transform modes:
   ego  (default)  Each input frame is in its own yaw-aligned ego frame. Target frames
@@ -43,7 +43,7 @@ GRID_RES = 0.05
 
 N_INPUT = 5
 N_TARGET = 5
-FRAME_SKIP = 5
+FRAME_STRIDE = 5
 
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
 PF_INT8    = 1
@@ -276,10 +276,17 @@ def main():
             "'map' keeps each frame rotation-only (north-up, no position offset)."
         ),
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=FRAME_STRIDE,
+        help=f"Stride between selected frames in raw scans (default: {FRAME_STRIDE}).",
+    )
     args = parser.parse_args()
 
     bag_dir = Path(args.bag).expanduser().resolve()
     mode = args.mode
+    frame_skip = args.stride
     if not bag_dir.exists():
         print(f"Bag path does not exist: {bag_dir}", file=sys.stderr)
         sys.exit(2)
@@ -287,7 +294,7 @@ def main():
     output_dir = Path("data") / mode / bag_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    window_size = (N_INPUT + N_TARGET - 1) * FRAME_SKIP + 1
+    window_size = (N_INPUT + N_TARGET - 1) * frame_skip + 1
     typestore = get_typestore(Stores.ROS2_HUMBLE)
 
     input_paths = [bag_dir]
@@ -363,23 +370,23 @@ def main():
 
         # --- pass 3: slide window and save training sets ---
         # Each set spans (N_INPUT + N_TARGET - 1) * FRAME_SKIP + 1 scans
-        span = (N_INPUT + N_TARGET - 1) * FRAME_SKIP
+        span = (N_INPUT + N_TARGET - 1) * frame_skip
         n_sets = len(scans) - span
         if n_sets <= 0:
-            print(f"Not enough scans ({len(scans)}) for frame_skip={FRAME_SKIP}.", file=sys.stderr)
+            print(f"Not enough scans ({len(scans)}) for frame_skip={frame_skip}.", file=sys.stderr)
             sys.exit(1)
 
-        print(f"Generating {n_sets} training sets (frame_skip={FRAME_SKIP})...")
+        print(f"Generating {n_sets} training sets (frame_skip={frame_skip})...")
         set_idx = 0
         for i in range(n_sets):
-            anchor_scan_idx = i + (N_INPUT - 1) * FRAME_SKIP
+            anchor_scan_idx = i + (N_INPUT - 1) * frame_skip
             _anchor_xyz_world, anchor_trans, anchor_rot_yaw, _anchor_time_ns, _anchor_yaw = scans[anchor_scan_idx]
 
             input_occupancy = []
             input_motion = np.zeros((N_INPUT, 2), dtype=np.float32)
 
             for j in range(N_INPUT):
-                scan_idx = i + j * FRAME_SKIP
+                scan_idx = i + j * frame_skip
                 xyz_world, trans, rot_yaw, scan_t_ns, yaw = scans[scan_idx]
                 if mode == "map":
                     xyz_frame = xyz_world - trans  # rotation-only: xyz @ rot.T
@@ -394,7 +401,7 @@ def main():
                 input_occupancy.append((grid > 0).astype(np.float32))
 
                 if j > 0:
-                    prev_scan_idx = i + (j - 1) * FRAME_SKIP
+                    prev_scan_idx = i + (j - 1) * frame_skip
                     _prev_xyz_world, prev_trans, _prev_rot_yaw, prev_time_ns, prev_yaw = scans[prev_scan_idx]
                     input_motion[j] = build_motion_features(
                         curr_trans=trans,
@@ -409,7 +416,7 @@ def main():
             target_occupancy = []
 
             for j in range(N_TARGET):
-                scan_idx = i + (N_INPUT + j) * FRAME_SKIP
+                scan_idx = i + (N_INPUT + j) * frame_skip
                 xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
                 if mode == "map":
                     # Anchor to last input frame position, keep north-up orientation

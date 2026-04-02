@@ -411,7 +411,7 @@ def main():
                     added = True
                     # Set a reasonable initial view
                     render_opt = vis.get_render_option()
-                    render_opt.point_size = 5.0
+                    render_opt.point_size = 3.0
                     render_opt.background_color = np.array([0.2, 0.2, 0.2], dtype=np.float64)
                 else:
                     vis.update_geometry(pcd)

@@ -9,3 +9,4 @@ train/ckpts/
 .DS_Store
 .conda/
 *.pyc
+cheat_sheet/

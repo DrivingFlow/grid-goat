@@ -6,8 +6,9 @@ Reports per-frame L2 error (RMSE), IoU, precision, recall and overall
 summary statistics.  Produces bar + box plots of per-frame metrics.
 
 Usage:
-  python train/benchmark.py --data data/ego/<benchmark_folder> --ckpt train/ckpts/model.pth (single model)
-  python train/benchmark.py --data data/ego/<benchmark_folder> --ckpt train/ckpts/a.pth train/ckpts/b.pth (multiple models)
+  python train/benchmark.py --data data/ego/<folder> --ckpt train/ckpts/model.pth
+  python train/benchmark.py --data data/ego/<folder> --ckpt train/ckpts/a.pth train/ckpts/b.pth
+  python train/benchmark.py --data data/ego/<folder> data/map/<folder> --ckpt ego.pth map.pth
 """
 
 import argparse
@@ -23,7 +24,7 @@ from tqdm import tqdm
 from GridFormer import GridFormer
 from MapDataset import MapDataset
 
-PIXEL_THRESHOLD = 0.5
+PIXEL_THRESHOLD = 0.7
 
 
 # ── metric helpers ──────────────────────────────────────────────────────
@@ -123,7 +124,7 @@ def plot_single(metrics: dict, ckpt_name: str, n_future: int, save_dir: str | No
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     fig.suptitle(f"Benchmark – {ckpt_name}", fontsize=14)
 
-    titles = ["L2 (RMSE)", "IoU", "Precision", "Recall"]
+    titles = ["RMSE", "IoU", "Precision", "Recall"]
     keys = ["l2", "iou", "precision", "recall"]
 
     for ax, title, key in zip(axes.flat, titles, keys):
@@ -156,7 +157,7 @@ def plot_comparison(all_results: dict, n_future: int, save_dir: str | None):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("Checkpoint Comparison", fontsize=14)
 
-    titles = ["L2 (RMSE) ↓", "IoU ↑", "Precision ↑", "Recall ↑"]
+    titles = ["RMSE ↓", "IoU ↑", "Precision ↑", "Recall ↑"]
     keys = ["l2", "iou", "precision", "recall"]
 
     for ax, title, key in zip(axes.flat, titles, keys):
@@ -184,14 +185,25 @@ def plot_comparison(all_results: dict, n_future: int, save_dir: str | None):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark GridFormer checkpoints")
-    parser.add_argument("--data", required=True, help="Path to benchmark data folder")
+    parser.add_argument("--data", required=True, nargs="+",
+                        help="Data folder(s). One for all ckpts, or one per ckpt.")
     parser.add_argument("--ckpt", required=True, nargs="+", help="One or more checkpoint paths")
     parser.add_argument("--save", default=None, help="Directory to save plots (optional)")
     args = parser.parse_args()
 
-    if not os.path.isdir(args.data):
-        print(f"Data folder not found: {args.data}", file=sys.stderr)
+    if len(args.data) == 1:
+        data_paths = args.data * len(args.ckpt)
+    elif len(args.data) == len(args.ckpt):
+        data_paths = args.data
+    else:
+        print(f"Got {len(args.data)} --data paths but {len(args.ckpt)} --ckpt paths. "
+              f"Provide 1 data path (shared) or one per checkpoint.", file=sys.stderr)
         sys.exit(1)
+
+    for d in data_paths:
+        if not os.path.isdir(d):
+            print(f"Data folder not found: {d}", file=sys.stderr)
+            sys.exit(1)
     for c in args.ckpt:
         if not os.path.isfile(c):
             print(f"Checkpoint not found: {c}", file=sys.stderr)
@@ -205,18 +217,17 @@ def main():
         device = "cpu"
     print(f"Device: {device}")
 
-    dataset = MapDataset(root=args.data, T=5, F=5)
-    print(f"Benchmark dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
-
     if args.save:
         os.makedirs(args.save, exist_ok=True)
 
     all_results = {}
 
-    for ckpt_path in args.ckpt:
+    for ckpt_path, data_path in zip(args.ckpt, data_paths):
+        dataset = MapDataset(root=data_path, T=5, F=5)
         ckpt_name = os.path.splitext(os.path.basename(ckpt_path))[0]
         print(f"\n{'='*60}")
-        print(f"Evaluating: {ckpt_name}")
+        print(f"Evaluating: {ckpt_name}  (data: {data_path})")
+        print(f"Dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
         print(f"{'='*60}")
 
         metrics = evaluate(ckpt_path, dataset, device)
@@ -225,7 +236,7 @@ def main():
         n_future = metrics["l2"].shape[1]
 
         # Print per-frame table
-        print(f"\n{'Frame':<8} {'L2 (RMSE)':<14} {'IoU':<10} {'Precision':<12} {'Recall':<10}")
+        print(f"\n{'Frame':<8} {'RMSE':<14} {'IoU':<10} {'Precision':<12} {'Recall':<10}")
         print("-" * 54)
         for f in range(n_future):
             l2_mean = metrics["l2"][:, f].mean()
