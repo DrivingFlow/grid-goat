@@ -3,7 +3,11 @@
 Generate training data for occupancy-grid prediction from a ROS2 bag.
 
 Usage:
-    python save_frame.py /path/to/bag_folder [--mode {ego,map}] [--stride N]
+    python save_frame.py /path/to/bag_or_bags_folder [--mode {ego,map}] [--stride N] [--gap N]
+
+If the given path is a folder containing multiple bag sub-folders (i.e. no
+metadata.yaml and no .db3 files at the top level), each sub-folder is
+processed as a separate bag automatically.
 
 Transform modes:
   ego  (default)  Each input frame is in its own yaw-aligned ego frame. Target frames
@@ -263,38 +267,29 @@ def build_motion_features(
     return np.array([forward_speed, yaw_rate], dtype=np.float32)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate training data from a ROS2 bag.")
-    parser.add_argument("bag", help="Path to bag folder")
-    parser.add_argument(
-        "--mode",
-        choices=["map", "ego"],
-        default="ego",
-        help=(
-            "Transform mode: "
-            "'ego' (default) anchors all frames to the last input frame's yaw-aligned pose; "
-            "'map' keeps each frame rotation-only (north-up, no position offset)."
-        ),
-    )
-    parser.add_argument(
-        "--stride",
-        type=int,
-        default=FRAME_STRIDE,
-        help=f"Stride between selected frames in raw scans (default: {FRAME_STRIDE}).",
-    )
-    args = parser.parse_args()
+def _is_bag_folder(path: Path) -> bool:
+    """Return True if *path* looks like a single ROS 2 bag (has metadata.yaml or .db3 files)."""
+    if not path.is_dir():
+        return False
+    if (path / "metadata.yaml").exists():
+        return True
+    if list(path.glob("*.db3")):
+        return True
+    return False
 
-    bag_dir = Path(args.bag).expanduser().resolve()
-    mode = args.mode
-    frame_skip = args.stride
-    if not bag_dir.exists():
-        print(f"Bag path does not exist: {bag_dir}", file=sys.stderr)
-        sys.exit(2)
 
+def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
+    """Process a single bag folder and save training data."""
     output_dir = Path("data") / mode / bag_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    window_size = (N_INPUT + N_TARGET - 1) * frame_skip + 1
+    # Total raw-scan span of one sample:
+    #   (N_INPUT - 1) * stride  +  gap  +  N_TARGET * stride
+    # Last input is at offset (N_INPUT-1)*stride from window start.
+    # First target is at offset (N_INPUT-1)*stride + gap + 1.
+    # Last target is at offset (N_INPUT-1)*stride + gap + 1 + (N_TARGET-1)*stride.
+    span = (N_INPUT - 1) * frame_skip + gap + 1 + (N_TARGET - 1) * frame_skip
+    window_size = span + 1
     typestore = get_typestore(Stores.ROS2_HUMBLE)
 
     input_paths = [bag_dir]
@@ -369,14 +364,13 @@ def main():
             sys.exit(1)
 
         # --- pass 3: slide window and save training sets ---
-        # Each set spans (N_INPUT + N_TARGET - 1) * FRAME_SKIP + 1 scans
-        span = (N_INPUT + N_TARGET - 1) * frame_skip
         n_sets = len(scans) - span
         if n_sets <= 0:
             print(f"Not enough scans ({len(scans)}) for frame_skip={frame_skip}.", file=sys.stderr)
             sys.exit(1)
 
-        print(f"Generating {n_sets} training sets (frame_skip={frame_skip})...")
+        print(f"Generating {n_sets} training sets (stride={frame_skip}, gap={gap})...")
+        target_offset = (N_INPUT - 1) * frame_skip + gap + 1  # raw-scan offset to first target
         set_idx = 0
         for i in range(n_sets):
             anchor_scan_idx = i + (N_INPUT - 1) * frame_skip
@@ -416,7 +410,7 @@ def main():
             target_occupancy = []
 
             for j in range(N_TARGET):
-                scan_idx = i + (N_INPUT + j) * frame_skip
+                scan_idx = i + target_offset + j * frame_skip
                 xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
                 if mode == "map":
                     # Anchor to last input frame position, keep north-up orientation
@@ -449,6 +443,61 @@ def main():
             set_idx += 1
 
     print(f"Done. Generated {set_idx} training sets in {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate training data from a ROS2 bag.")
+    parser.add_argument("bag", help="Path to a single bag folder, or a parent folder containing multiple bags")
+    parser.add_argument(
+        "--mode",
+        choices=["map", "ego"],
+        default="ego",
+        help=(
+            "Transform mode: "
+            "'ego' (default) anchors all frames to the last input frame's yaw-aligned pose; "
+            "'map' keeps each frame rotation-only (north-up, no position offset)."
+        ),
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=FRAME_STRIDE,
+        help=f"Stride between selected frames in raw scans (default: {FRAME_STRIDE}).",
+    )
+    parser.add_argument(
+        "--gap",
+        type=int,
+        default=0,
+        help="Number of raw frames to skip between the last input and first target (default: 0).",
+    )
+    args = parser.parse_args()
+
+    bag_path = Path(args.bag).expanduser().resolve()
+    mode = args.mode
+    frame_skip = args.stride
+    gap = args.gap
+    if not bag_path.exists():
+        print(f"Path does not exist: {bag_path}", file=sys.stderr)
+        sys.exit(2)
+
+    if _is_bag_folder(bag_path):
+        # Single bag
+        process_bag(bag_path, mode, frame_skip, gap)
+    elif bag_path.is_dir():
+        # Parent folder containing multiple bags
+        bag_dirs = sorted([d for d in bag_path.iterdir() if d.is_dir() and _is_bag_folder(d)])
+        if not bag_dirs:
+            print(f"No bag folders found in {bag_path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Found {len(bag_dirs)} bag(s) in {bag_path}")
+        for idx, bd in enumerate(bag_dirs, 1):
+            print(f"\n{'='*60}")
+            print(f"[{idx}/{len(bag_dirs)}] Processing {bd.name}")
+            print(f"{'='*60}")
+            process_bag(bd, mode, frame_skip, gap)
+    else:
+        print(f"Not a directory: {bag_path}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

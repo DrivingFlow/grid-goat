@@ -2,7 +2,7 @@
 """
 Benchmark a trained GridFormer checkpoint on a held-out dataset.
 
-Reports per-frame L2 error (RMSE), IoU, precision, recall and overall
+Reports per-frame RMSE, IoU, precision, recall and overall
 summary statistics.  Produces bar + box plots of per-frame metrics.
 
 Usage:
@@ -29,7 +29,7 @@ PIXEL_THRESHOLD = 0.7
 
 # ── metric helpers ──────────────────────────────────────────────────────
 
-def frame_l2(pred: np.ndarray, gt: np.ndarray) -> float:
+def frame_rmse(pred: np.ndarray, gt: np.ndarray) -> float:
     """Per-pixel RMSE between predicted probability map and binary GT."""
     return float(np.sqrt(np.mean((pred - gt) ** 2)))
 
@@ -77,10 +77,10 @@ def evaluate(ckpt_path: str, dataset: MapDataset, device: str):
     n_samples = len(dataset)
 
     # (n_samples, n_future)
-    l2_all = np.zeros((n_samples, n_future), dtype=np.float64)
-    iou_all = np.zeros_like(l2_all)
-    prec_all = np.zeros_like(l2_all)
-    rec_all = np.zeros_like(l2_all)
+    rmse_all = np.zeros((n_samples, n_future), dtype=np.float64)
+    iou_all = np.zeros_like(rmse_all)
+    prec_all = np.zeros_like(rmse_all)
+    rec_all = np.zeros_like(rmse_all)
 
     row = 0
     for X_grids, X_motion, Y in tqdm(loader, desc="Evaluating", unit="batch"):
@@ -93,7 +93,7 @@ def evaluate(ckpt_path: str, dataset: MapDataset, device: str):
                 Y_pred = model(X_grids, X_motion)
 
         pred_np = Y_pred.cpu().float().numpy()  # (B, F, 1, H, W)
-        true_np = Y.numpy()                      # (B, F, 1, H, W)
+        true_np = Y.numpy()                     # (B, F, 1, H, W)
 
         for b in range(bs):
             for f in range(n_future):
@@ -102,13 +102,13 @@ def evaluate(ckpt_path: str, dataset: MapDataset, device: str):
                 p_bin = p > PIXEL_THRESHOLD
                 g_bin = g > PIXEL_THRESHOLD
 
-                l2_all[row, f] = frame_l2(p, g)
+                rmse_all[row, f] = frame_rmse(p, g)
                 iou_all[row, f] = frame_iou(p_bin, g_bin)
                 prec_all[row, f], rec_all[row, f] = frame_precision_recall(p_bin, g_bin)
             row += 1
 
     return {
-        "l2": l2_all,
+        "rmse": rmse_all,
         "iou": iou_all,
         "precision": prec_all,
         "recall": rec_all,
@@ -125,7 +125,7 @@ def plot_single(metrics: dict, ckpt_name: str, n_future: int, save_dir: str | No
     fig.suptitle(f"Benchmark – {ckpt_name}", fontsize=14)
 
     titles = ["RMSE", "IoU", "Precision", "Recall"]
-    keys = ["l2", "iou", "precision", "recall"]
+    keys = ["rmse", "iou", "precision", "recall"]
 
     for ax, title, key in zip(axes.flat, titles, keys):
         data = metrics[key]  # (n_samples, n_future)
@@ -158,7 +158,7 @@ def plot_comparison(all_results: dict, n_future: int, save_dir: str | None):
     fig.suptitle("Checkpoint Comparison", fontsize=14)
 
     titles = ["RMSE ↓", "IoU ↑", "Precision ↑", "Recall ↑"]
-    keys = ["l2", "iou", "precision", "recall"]
+    keys = ["rmse", "iou", "precision", "recall"]
 
     for ax, title, key in zip(axes.flat, titles, keys):
         for j, name in enumerate(names):
@@ -233,20 +233,20 @@ def main():
         metrics = evaluate(ckpt_path, dataset, device)
         all_results[ckpt_name] = metrics
 
-        n_future = metrics["l2"].shape[1]
+        n_future = metrics["rmse"].shape[1]
 
         # Print per-frame table
         print(f"\n{'Frame':<8} {'RMSE':<14} {'IoU':<10} {'Precision':<12} {'Recall':<10}")
         print("-" * 54)
         for f in range(n_future):
-            l2_mean = metrics["l2"][:, f].mean()
+            rmse_mean = metrics["rmse"][:, f].mean()
             iou_mean = metrics["iou"][:, f].mean()
             prec_mean = metrics["precision"][:, f].mean()
             rec_mean = metrics["recall"][:, f].mean()
-            print(f"  {f+1:<6} {l2_mean:<14.6f} {iou_mean:<10.4f} {prec_mean:<12.4f} {rec_mean:<10.4f}")
+            print(f"  {f+1:<6} {rmse_mean:<14.6f} {iou_mean:<10.4f} {prec_mean:<12.4f} {rec_mean:<10.4f}")
 
         # Print summary
-        print(f"\n{'Overall':<8} {metrics['l2'].mean():<14.6f} {metrics['iou'].mean():<10.4f} "
+        print(f"\n{'Overall':<8} {metrics['rmse'].mean():<14.6f} {metrics['iou'].mean():<10.4f} "
               f"{metrics['precision'].mean():<12.4f} {metrics['recall'].mean():<10.4f}")
 
         if len(args.ckpt) == 1:
