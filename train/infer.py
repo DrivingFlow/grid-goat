@@ -47,12 +47,15 @@ def main():
     dataset = MapDataset(root=args.data, T=5, F=5)
     print(f"Dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
 
+    state = torch.load(args.ckpt, map_location="cpu")
+    dec_layer_ids = [int(k.split(".")[2]) for k in state if k.startswith("decoder.layers.")]
+    num_decoder_layers = max(dec_layer_ids) + 1 if dec_layer_ids else 2
     model = GridFormer(
         grid_h=dataset.H,
         grid_w=dataset.W,
         motion_dim=dataset.motion_dim,
+        num_decoder_layers=num_decoder_layers,
     )
-    state = torch.load(args.ckpt, map_location="cpu")
     model.load_state_dict(state)
     model.to(device)
     model.eval()

@@ -56,12 +56,16 @@ BATCH_SIZE = 32
 
 def evaluate(ckpt_path: str, dataset: MapDataset, device: str):
     """Run inference on *dataset* with a single checkpoint. Returns metrics dict."""
+    state = torch.load(ckpt_path, map_location="cpu")
+    # Auto-detect number of decoder layers from checkpoint keys
+    dec_layer_ids = [int(k.split(".")[2]) for k in state if k.startswith("decoder.layers.")]
+    num_decoder_layers = max(dec_layer_ids) + 1 if dec_layer_ids else 2
     model = GridFormer(
         grid_h=dataset.H,
         grid_w=dataset.W,
         motion_dim=dataset.motion_dim,
+        num_decoder_layers=num_decoder_layers,
     )
-    state = torch.load(ckpt_path, map_location="cpu")
     model.load_state_dict(state)
     model.to(device)
     model.eval()
