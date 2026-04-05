@@ -39,6 +39,9 @@ PLAYBACK_SPEED = 4.0
 Z_RANGE = (0.1, 1.0)
 GRID_RES = 0.05
 
+ORIGIN_CROP_RADIUS = 0.06
+ORIGIN_CROP_FORWARD_OFFSET = 0.20
+
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
 PF_INT8    = 1
 PF_UINT8   = 2
@@ -128,6 +131,33 @@ def extract_pose_transform(msg) -> tuple[np.ndarray, np.ndarray]:
             return r, t
 
     raise ValueError("Unsupported pose message layout for /pcl_pose")
+
+def apply_origin_crop(grid, robot_yaw=0.0, ego_aligned=True, robot_xy_m=None):
+    """Clear a small circular region near the robot to remove self-observed LiDAR artifacts."""
+    if ORIGIN_CROP_RADIUS <= 0.0:
+        return grid
+    res = GRID_RES
+    origin_x = -EGO_RADIUS_M
+    origin_y = EGO_RADIUS_M
+    rx = robot_xy_m[0] if robot_xy_m is not None else 0.0
+    ry = robot_xy_m[1] if robot_xy_m is not None else 0.0
+    if ego_aligned:
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET
+        dy = ry
+    else:
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * float(np.cos(robot_yaw))
+        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * float(np.sin(robot_yaw))
+    center_col = round((dx - origin_x) / res)
+    center_row = round((origin_y - dy) / res)
+    radius_px = int(np.ceil(ORIGIN_CROP_RADIUS / res))
+    rr, cc = np.ogrid[max(0, center_row - radius_px):min(grid.shape[0], center_row + radius_px + 1),
+                       max(0, center_col - radius_px):min(grid.shape[1], center_col + radius_px + 1)]
+    mask = (rr - center_row)**2 + (cc - center_col)**2 <= radius_px**2
+    row_start = max(0, center_row - radius_px)
+    col_start = max(0, center_col - radius_px)
+    grid[row_start:row_start + mask.shape[0], col_start:col_start + mask.shape[1]][mask] = 0
+    return grid
+
 
 def ego_scan_to_grid(xyz: np.ndarray, radius: float, res: float, z_range: tuple[float, float]) -> np.ndarray:
     """
@@ -388,6 +418,8 @@ def main():
 
                 # Generate 2D occupancy grid
                 grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                robot_yaw = float(np.arctan2(rot[1, 0], rot[0, 0]))
+                apply_origin_crop(grid, robot_yaw=robot_yaw, ego_aligned=(mode == "ego"))
                 
                 # Visualize 2D occupancy grid with OpenCV
                 vis_grid = cv2.resize(grid, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_NEAREST)

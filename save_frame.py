@@ -49,6 +49,9 @@ N_INPUT = 5
 N_TARGET = 5
 FRAME_STRIDE = 5
 
+ORIGIN_CROP_RADIUS = 0.06
+ORIGIN_CROP_FORWARD_OFFSET = 0.20
+
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
 PF_INT8    = 1
 PF_UINT8   = 2
@@ -233,6 +236,38 @@ def ego_scan_to_grid(xyz: np.ndarray, radius: float, res: float, z_range: tuple[
     return grid
 
 
+def apply_origin_crop(grid, robot_yaw=0.0, ego_aligned=True, robot_xy_m=None):
+    """Clear a small circular region near the robot to remove self-observed LiDAR artifacts.
+
+    robot_xy_m: optional (x, y) position of the robot in the grid's metric frame,
+                for when the grid is not centered on the robot (e.g. target frames
+                anchored on a different pose). Default None = robot at grid center (0, 0).
+    """
+    if ORIGIN_CROP_RADIUS <= 0.0:
+        return grid
+    res = GRID_RES
+    origin_x = -EGO_RADIUS_M
+    origin_y = EGO_RADIUS_M
+    rx = robot_xy_m[0] if robot_xy_m is not None else 0.0
+    ry = robot_xy_m[1] if robot_xy_m is not None else 0.0
+    if ego_aligned:
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET
+        dy = ry
+    else:
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * float(np.cos(robot_yaw))
+        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * float(np.sin(robot_yaw))
+    center_col = round((dx - origin_x) / res)
+    center_row = round((origin_y - dy) / res)
+    radius_px = int(np.ceil(ORIGIN_CROP_RADIUS / res))
+    rr, cc = np.ogrid[max(0, center_row - radius_px):min(grid.shape[0], center_row + radius_px + 1),
+                       max(0, center_col - radius_px):min(grid.shape[1], center_col + radius_px + 1)]
+    mask = (rr - center_row)**2 + (cc - center_col)**2 <= radius_px**2
+    row_start = max(0, center_row - radius_px)
+    col_start = max(0, center_col - radius_px)
+    grid[row_start:row_start + mask.shape[0], col_start:col_start + mask.shape[1]][mask] = 0
+    return grid
+
+
 def nearest_pose_idx(pose_times_arr: np.ndarray, scan_t: int) -> int:
     right_idx = int(np.searchsorted(pose_times_arr, scan_t, side="left"))
     if right_idx <= 0:
@@ -392,6 +427,8 @@ def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
                 xyz_grid = xyz_frame.copy()
                 xyz_grid[:, 2] += trans[2]
                 grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                ego_aligned = (mode == "ego")
+                apply_origin_crop(grid, robot_yaw=yaw, ego_aligned=ego_aligned)
                 input_occupancy.append((grid > 0).astype(np.float32))
 
                 if j > 0:
@@ -423,6 +460,14 @@ def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
                 xyz_grid = xyz_frame.copy()
                 xyz_grid[:, 2] += anchor_trans[2]
                 grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+                # Target robot offset from anchor in the grid's coordinate frame
+                ego_aligned = (mode == "ego")
+                if ego_aligned:
+                    robot_offset = (trans_j - anchor_trans) @ anchor_rot_yaw
+                else:
+                    robot_offset = trans_j - anchor_trans
+                apply_origin_crop(grid, robot_yaw=_yaw, ego_aligned=ego_aligned,
+                                  robot_xy_m=(float(robot_offset[0]), float(robot_offset[1])))
                 target_occupancy.append((grid > 0).astype(np.float32))
 
             x_occ = np.stack(input_occupancy, axis=0)
