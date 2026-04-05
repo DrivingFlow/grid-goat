@@ -49,8 +49,9 @@ N_INPUT = 5
 N_TARGET = 5
 FRAME_STRIDE = 5
 
-ORIGIN_CROP_RADIUS = 0.06
-ORIGIN_CROP_FORWARD_OFFSET = 0.20
+ORIGIN_CROP_RADIUS = 0.20
+ORIGIN_CROP_FORWARD_OFFSET = 0.17
+ORIGIN_CROP_LATERAL_OFFSET = 0.05
 
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
 PF_INT8    = 1
@@ -252,10 +253,11 @@ def apply_origin_crop(grid, robot_yaw=0.0, ego_aligned=True, robot_xy_m=None):
     ry = robot_xy_m[1] if robot_xy_m is not None else 0.0
     if ego_aligned:
         dx = rx + ORIGIN_CROP_FORWARD_OFFSET
-        dy = ry
+        dy = ry + ORIGIN_CROP_LATERAL_OFFSET
     else:
-        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * float(np.cos(robot_yaw))
-        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * float(np.sin(robot_yaw))
+        c, s = float(np.cos(robot_yaw)), float(np.sin(robot_yaw))
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * c - ORIGIN_CROP_LATERAL_OFFSET * s
+        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * s + ORIGIN_CROP_LATERAL_OFFSET * c
     center_col = round((dx - origin_x) / res)
     center_row = round((origin_y - dy) / res)
     radius_px = int(np.ceil(ORIGIN_CROP_RADIUS / res))

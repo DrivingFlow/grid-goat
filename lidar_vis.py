@@ -39,8 +39,9 @@ PLAYBACK_SPEED = 4.0
 Z_RANGE = (0.1, 1.0)
 GRID_RES = 0.05
 
-ORIGIN_CROP_RADIUS = 0.06
-ORIGIN_CROP_FORWARD_OFFSET = 0.20
+ORIGIN_CROP_RADIUS = 0.20
+ORIGIN_CROP_FORWARD_OFFSET = 0.17
+ORIGIN_CROP_LATERAL_OFFSET = 0.05
 
 # PointField datatype constants (ROS2 sensor_msgs/msg/PointField)
 PF_INT8    = 1
@@ -143,10 +144,11 @@ def apply_origin_crop(grid, robot_yaw=0.0, ego_aligned=True, robot_xy_m=None):
     ry = robot_xy_m[1] if robot_xy_m is not None else 0.0
     if ego_aligned:
         dx = rx + ORIGIN_CROP_FORWARD_OFFSET
-        dy = ry
+        dy = ry + ORIGIN_CROP_LATERAL_OFFSET
     else:
-        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * float(np.cos(robot_yaw))
-        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * float(np.sin(robot_yaw))
+        c, s = float(np.cos(robot_yaw)), float(np.sin(robot_yaw))
+        dx = rx + ORIGIN_CROP_FORWARD_OFFSET * c - ORIGIN_CROP_LATERAL_OFFSET * s
+        dy = ry + ORIGIN_CROP_FORWARD_OFFSET * s + ORIGIN_CROP_LATERAL_OFFSET * c
     center_col = round((dx - origin_x) / res)
     center_row = round((origin_y - dy) / res)
     radius_px = int(np.ceil(ORIGIN_CROP_RADIUS / res))
@@ -422,7 +424,28 @@ def main():
                 apply_origin_crop(grid, robot_yaw=robot_yaw, ego_aligned=(mode == "ego"))
                 
                 # Visualize 2D occupancy grid with OpenCV
-                vis_grid = cv2.resize(grid, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_NEAREST)
+                vis_grid = cv2.cvtColor(
+                    cv2.resize(grid, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_NEAREST),
+                    cv2.COLOR_GRAY2BGR,
+                )
+                # Mark robot origin in red (grid center = pixel 100,100, scaled 2x = 200,200)
+                grid_half = grid.shape[0] // 2
+                cx, cy = int(grid_half * 2), int(grid_half * 2)
+                cv2.circle(vis_grid, (cx, cy), 0, (0, 0, 255), -1)
+                # Draw crop circle in blue
+                res = GRID_RES
+                origin_x, origin_y = -EGO_RADIUS_M, EGO_RADIUS_M
+                if mode == "ego":
+                    crop_dx = ORIGIN_CROP_FORWARD_OFFSET
+                    crop_dy = ORIGIN_CROP_LATERAL_OFFSET
+                else:
+                    c_yaw, s_yaw = float(np.cos(robot_yaw)), float(np.sin(robot_yaw))
+                    crop_dx = ORIGIN_CROP_FORWARD_OFFSET * c_yaw - ORIGIN_CROP_LATERAL_OFFSET * s_yaw
+                    crop_dy = ORIGIN_CROP_FORWARD_OFFSET * s_yaw + ORIGIN_CROP_LATERAL_OFFSET * c_yaw
+                crop_col = int(round((crop_dx - origin_x) / res)) * 2
+                crop_row = int(round((origin_y - crop_dy) / res)) * 2
+                crop_radius_px = int(np.ceil(ORIGIN_CROP_RADIUS / res)) * 2
+                cv2.circle(vis_grid, (crop_col, crop_row), crop_radius_px, (255, 0, 0), 1)
                 cv2.imshow("Occupancy Grid", vis_grid)
                 key = cv2.waitKey(1)
                 if key == 27 or key == ord('q'): # ESC or q
