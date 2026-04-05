@@ -3,7 +3,7 @@
 Generate training data for occupancy-grid prediction from a ROS2 bag.
 
 Usage:
-    python save_frame.py /path/to/bag_or_bags_folder [--mode {ego,map}] [--stride N] [--gap N]
+    python save_frame.py /path/to/bag_or_bags_folder [--mode {ego,map}] [--stride N] [--target-stride N] [--gap N]
 
 If the given path is a folder containing multiple bag sub-folders (i.e. no
 metadata.yaml and no .db3 files at the top level), each sub-folder is
@@ -17,7 +17,6 @@ Transform modes:
   map             Same anchor-centred positioning as ego, but north-up (no yaw rotation).
                   Input frames are centred on their own pose; target frames are centred on
                   the anchor. Output saved to data/map/<bag_name>/.
-                  sensor frame. Output saved to data/map/<bag_name>/.
 
 For each sliding window of (N_INPUT + N_TARGET) consecutive LiDAR scans, each .npz contains:
     - x_grids:  (N_INPUT, 2, H, W) float32
@@ -315,17 +314,14 @@ def _is_bag_folder(path: Path) -> bool:
     return False
 
 
-def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
+def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int, gap: int):
     """Process a single bag folder and save training data."""
     output_dir = Path("data") / mode / bag_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Total raw-scan span of one sample:
-    #   (N_INPUT - 1) * stride  +  gap  +  N_TARGET * stride
-    # Last input is at offset (N_INPUT-1)*stride from window start.
-    # First target is at offset (N_INPUT-1)*stride + gap + 1.
-    # Last target is at offset (N_INPUT-1)*stride + gap + 1 + (N_TARGET-1)*stride.
-    span = (N_INPUT - 1) * frame_skip + gap + 1 + (N_TARGET - 1) * frame_skip
+    #   (N_INPUT - 1) * input_stride  +  gap  +  1  +  (N_TARGET - 1) * target_stride
+    span = (N_INPUT - 1) * input_stride + gap + 1 + (N_TARGET - 1) * target_stride
     window_size = span + 1
     typestore = get_typestore(Stores.ROS2_HUMBLE)
 
@@ -403,21 +399,21 @@ def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
         # --- pass 3: slide window and save training sets ---
         n_sets = len(scans) - span
         if n_sets <= 0:
-            print(f"Not enough scans ({len(scans)}) for frame_skip={frame_skip}.", file=sys.stderr)
+            print(f"Not enough scans ({len(scans)}) for input_stride={input_stride}, target_stride={target_stride}.", file=sys.stderr)
             sys.exit(1)
 
-        print(f"Generating {n_sets} training sets (stride={frame_skip}, gap={gap})...")
-        target_offset = (N_INPUT - 1) * frame_skip + gap + 1  # raw-scan offset to first target
+        print(f"Generating {n_sets} training sets (input_stride={input_stride}, target_stride={target_stride}, gap={gap})...")
+        target_offset = (N_INPUT - 1) * input_stride + gap + 1  # raw-scan offset to first target
         set_idx = 0
         for i in range(n_sets):
-            anchor_scan_idx = i + (N_INPUT - 1) * frame_skip
+            anchor_scan_idx = i + (N_INPUT - 1) * input_stride
             _anchor_xyz_world, anchor_trans, anchor_rot_yaw, _anchor_time_ns, _anchor_yaw = scans[anchor_scan_idx]
 
             input_occupancy = []
             input_motion = np.zeros((N_INPUT, 2), dtype=np.float32)
 
             for j in range(N_INPUT):
-                scan_idx = i + j * frame_skip
+                scan_idx = i + j * input_stride
                 xyz_world, trans, rot_yaw, scan_t_ns, yaw = scans[scan_idx]
                 if mode == "map":
                     xyz_frame = xyz_world - trans  # rotation-only: xyz @ rot.T
@@ -434,7 +430,7 @@ def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
                 input_occupancy.append((grid > 0).astype(np.float32))
 
                 if j > 0:
-                    prev_scan_idx = i + (j - 1) * frame_skip
+                    prev_scan_idx = i + (j - 1) * input_stride
                     _prev_xyz_world, prev_trans, _prev_rot_yaw, prev_time_ns, prev_yaw = scans[prev_scan_idx]
                     input_motion[j] = build_motion_features(
                         curr_trans=trans,
@@ -449,7 +445,7 @@ def process_bag(bag_dir: Path, mode: str, frame_skip: int, gap: int):
             target_occupancy = []
 
             for j in range(N_TARGET):
-                scan_idx = i + target_offset + j * frame_skip
+                scan_idx = i + target_offset + j * target_stride
                 xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
                 if mode == "map":
                     # Anchor to last input frame position, keep north-up orientation
@@ -509,7 +505,13 @@ def main():
         "--stride",
         type=int,
         default=FRAME_STRIDE,
-        help=f"Stride between selected frames in raw scans (default: {FRAME_STRIDE}).",
+        help=f"Stride between input frames in raw scans (default: {FRAME_STRIDE}).",
+    )
+    parser.add_argument(
+        "--target-stride",
+        type=int,
+        default=None,
+        help="Stride between target frames in raw scans (default: same as --stride).",
     )
     parser.add_argument(
         "--gap",
@@ -521,7 +523,8 @@ def main():
 
     bag_path = Path(args.bag).expanduser().resolve()
     mode = args.mode
-    frame_skip = args.stride
+    input_stride = args.stride
+    target_stride = args.target_stride if args.target_stride is not None else input_stride
     gap = args.gap
     if not bag_path.exists():
         print(f"Path does not exist: {bag_path}", file=sys.stderr)
@@ -529,7 +532,7 @@ def main():
 
     if _is_bag_folder(bag_path):
         # Single bag
-        process_bag(bag_path, mode, frame_skip, gap)
+        process_bag(bag_path, mode, input_stride, target_stride, gap)
     elif bag_path.is_dir():
         # Parent folder containing multiple bags
         bag_dirs = sorted([d for d in bag_path.iterdir() if d.is_dir() and _is_bag_folder(d)])
@@ -541,7 +544,7 @@ def main():
             print(f"\n{'='*60}")
             print(f"[{idx}/{len(bag_dirs)}] Processing {bd.name}")
             print(f"{'='*60}")
-            process_bag(bd, mode, frame_skip, gap)
+            process_bag(bd, mode, input_stride, target_stride, gap)
     else:
         print(f"Not a directory: {bag_path}", file=sys.stderr)
         sys.exit(2)
