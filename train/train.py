@@ -1,6 +1,9 @@
 import math
 import os
+import sys
 import torch
+import argparse
+import glob as glob_mod
 import numpy as np
 import cv2
 from torch.utils.data import random_split, ConcatDataset
@@ -19,6 +22,7 @@ MOTION_BCE_BOOST = 10.0
 MOTION_MASK_THRESHOLD = 0.05
 TEACHER_FORCING_START = 1.0
 TEACHER_FORCING_END = 0.0
+BATCH_SIZE = 16
 
 
 def make_arith_weights(n, device, a=0.3, b=0.1):
@@ -114,7 +118,7 @@ def log_sample_predictions(y_pred, y_true, epoch, tag="val"):
         caption = f"Frame {f} | left=GT  right=pred"
         images.append(wandb.Image(combined, caption=caption))
 
-    wandb.log({f"{tag}_predictions": images, "epoch": epoch})
+    wandb.log({f"{tag}_predictions": images})
 
 
 def export_test_predictions(model, test_set, device, output_dir):
@@ -185,11 +189,11 @@ def train(n_epochs, data_roots, resume_from=None, ckpt_path=None, save_results=F
 
     pin = device == "cuda"
     train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=16, shuffle=True, drop_last=True,
+        train_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True,
         num_workers=6, pin_memory=pin,
     )
     val_loader = torch.utils.data.DataLoader(
-        val_set, batch_size=16, shuffle=False, drop_last=False,
+        val_set, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,
         num_workers=6, pin_memory=pin,
     )
 
@@ -359,12 +363,12 @@ def train(n_epochs, data_roots, resume_from=None, ckpt_path=None, save_results=F
 
 
 if __name__ == "__main__":
-    import argparse
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_root = os.path.join(script_dir, "..", "data", "2026-03-04_data2")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", nargs="+", default=[default_root], help="One or more data folder paths")
+    parser.add_argument("--data", nargs="+", default=[default_root],
+                        help="Data folder path(s). Can be folders with .npz files, or a parent folder whose sub-folders each contain .npz files.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
     parser.add_argument("--resume", default=None, help="Path to pretrained .pth to resume from")
     parser.add_argument("--ckpt", default=None, help="Path to save best model checkpoint (default: train/ckpts/model.pth)")
@@ -372,9 +376,36 @@ if __name__ == "__main__":
     parser.add_argument("--results-name", default=None, help="Name of the results subfolder (default: data folder name(s))")
 
     args = parser.parse_args()
+
+    # Expand parent directories into sub-folders containing .npz files
+    expanded_roots = []
+    for p in args.data:
+        p = os.path.normpath(p)
+        if os.path.isdir(p) and glob_mod.glob(os.path.join(p, "set*.npz")):
+            expanded_roots.append(p)
+        elif os.path.isdir(p):
+            subs = sorted(
+                d for d in [os.path.join(p, e) for e in os.listdir(p)]
+                if os.path.isdir(d) and glob_mod.glob(os.path.join(d, "set*.npz"))
+            )
+            expanded_roots.extend(subs)
+        else:
+            print(f"Warning: skipping non-existent path: {p}", file=sys.stderr)
+
+    # Discard benchmark folders (containing "bench" in name)
+    discarded = [r for r in expanded_roots if "bench" in os.path.basename(r).lower()]
+    kept = [r for r in expanded_roots if "bench" not in os.path.basename(r).lower()]
+    if discarded:
+        print(f"Discarding {len(discarded)} benchmark folder(s):")
+        for d in discarded:
+            print(f"  - {d}")
+    if not kept:
+        print("No valid data folders found.", file=sys.stderr)
+        sys.exit(1)
+
     train(
         n_epochs=args.epochs,
-        data_roots=args.data,
+        data_roots=kept,
         resume_from=args.resume,
         ckpt_path=args.ckpt,
         save_results=args.save_results,
