@@ -31,6 +31,8 @@ For each sliding window of (N_INPUT + N_TARGET) consecutive LiDAR scans, each .n
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
+import os
 import sys
 from pathlib import Path
 import numpy as np
@@ -314,6 +316,98 @@ def _is_bag_folder(path: Path) -> bool:
     return False
 
 
+# ── parallel worker state ───────────────────────────────────────────────
+_worker_scans = None
+_worker_cfg = None
+
+
+def _init_worker(scans, cfg):
+    """Store shared read-only data in each worker process."""
+    global _worker_scans, _worker_cfg
+    _worker_scans = scans
+    _worker_cfg = cfg
+
+
+def _process_window(i):
+    """Build and save one training set for window index *i*."""
+    scans = _worker_scans
+    cfg = _worker_cfg
+    mode = cfg["mode"]
+    input_stride = cfg["input_stride"]
+    target_stride = cfg["target_stride"]
+    target_offset = cfg["target_offset"]
+    output_dir = cfg["output_dir"]
+    ego_aligned = (mode == "ego")
+
+    anchor_scan_idx = i + (N_INPUT - 1) * input_stride
+    _anchor_xyz_world, anchor_trans, anchor_rot_yaw, _anchor_time_ns, _anchor_yaw = scans[anchor_scan_idx]
+
+    input_occupancy = []
+    input_motion = np.zeros((N_INPUT, 2), dtype=np.float32)
+
+    for j in range(N_INPUT):
+        scan_idx = i + j * input_stride
+        xyz_world, trans, rot_yaw, scan_t_ns, yaw = scans[scan_idx]
+        if mode == "map":
+            xyz_frame = xyz_world - trans
+        else:
+            xyz_frame = world_to_anchor_frame(xyz_world, trans, rot_yaw)
+        d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
+        xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
+        xyz_grid = xyz_frame.copy()
+        xyz_grid[:, 2] += trans[2]
+        grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+        apply_origin_crop(grid, robot_yaw=yaw, ego_aligned=ego_aligned)
+        input_occupancy.append((grid > 0).astype(np.float32))
+
+        if j > 0:
+            prev_scan_idx = i + (j - 1) * input_stride
+            _prev_xyz_world, prev_trans, _prev_rot_yaw, prev_time_ns, prev_yaw = scans[prev_scan_idx]
+            input_motion[j] = build_motion_features(
+                curr_trans=trans,
+                curr_rot_yaw=rot_yaw,
+                curr_yaw=yaw,
+                curr_time_ns=scan_t_ns,
+                prev_trans=prev_trans,
+                prev_yaw=prev_yaw,
+                prev_time_ns=prev_time_ns,
+            )
+
+    target_occupancy = []
+    for j in range(N_TARGET):
+        scan_idx = i + target_offset + j * target_stride
+        xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
+        if mode == "map":
+            xyz_frame = xyz_world - anchor_trans
+        else:
+            xyz_frame = world_to_anchor_frame(xyz_world, anchor_trans, anchor_rot_yaw)
+        d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
+        xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
+        xyz_grid = xyz_frame.copy()
+        xyz_grid[:, 2] += anchor_trans[2]
+        grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
+        if ego_aligned:
+            robot_offset = (trans_j - anchor_trans) @ anchor_rot_yaw
+        else:
+            robot_offset = trans_j - anchor_trans
+        apply_origin_crop(grid, robot_yaw=_yaw, ego_aligned=ego_aligned,
+                          robot_xy_m=(float(robot_offset[0]), float(robot_offset[1])))
+        target_occupancy.append((grid > 0).astype(np.float32))
+
+    x_occ = np.stack(input_occupancy, axis=0)
+    x_delta = np.zeros_like(x_occ, dtype=np.float32)
+    x_delta[1:] = x_occ[1:] - x_occ[:-1]
+    x_grids = np.stack([x_occ, x_delta], axis=1).astype(np.float32)
+    y = np.stack(target_occupancy, axis=0)[:, None, :, :].astype(np.float32)
+
+    np.savez_compressed(
+        Path(output_dir) / f"set{i:06d}.npz",
+        x_grids=x_grids,
+        x_motion=input_motion.astype(np.float32),
+        y=y,
+    )
+
+
 def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int, gap: int):
     """Process a single bag folder and save training data."""
     output_dir = Path("data") / mode / bag_dir.name
@@ -404,88 +498,22 @@ def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int,
 
         print(f"Generating {n_sets} training sets (input_stride={input_stride}, target_stride={target_stride}, gap={gap})...")
         target_offset = (N_INPUT - 1) * input_stride + gap + 1  # raw-scan offset to first target
-        set_idx = 0
-        for i in range(n_sets):
-            anchor_scan_idx = i + (N_INPUT - 1) * input_stride
-            _anchor_xyz_world, anchor_trans, anchor_rot_yaw, _anchor_time_ns, _anchor_yaw = scans[anchor_scan_idx]
 
-            input_occupancy = []
-            input_motion = np.zeros((N_INPUT, 2), dtype=np.float32)
+        cfg = {
+            "mode": mode,
+            "input_stride": input_stride,
+            "target_stride": target_stride,
+            "target_offset": target_offset,
+            "output_dir": str(output_dir),
+        }
+        n_workers = min(os.cpu_count() or 1, n_sets)
+        print(f"  Using {n_workers} worker processes...")
+        with mp.Pool(n_workers, initializer=_init_worker, initargs=(scans, cfg)) as pool:
+            for done, _ in enumerate(pool.imap_unordered(_process_window, range(n_sets)), 1):
+                if done % 100 == 0 or done == n_sets:
+                    print(f"  {done}/{n_sets} sets")
 
-            for j in range(N_INPUT):
-                scan_idx = i + j * input_stride
-                xyz_world, trans, rot_yaw, scan_t_ns, yaw = scans[scan_idx]
-                if mode == "map":
-                    xyz_frame = xyz_world - trans  # rotation-only: xyz @ rot.T
-                else:
-                    xyz_frame = world_to_anchor_frame(xyz_world, trans, rot_yaw)
-                d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
-                xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                # Restore world-frame z so Z_RANGE is ground-relative, not sensor-relative
-                xyz_grid = xyz_frame.copy()
-                xyz_grid[:, 2] += trans[2]
-                grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
-                ego_aligned = (mode == "ego")
-                apply_origin_crop(grid, robot_yaw=yaw, ego_aligned=ego_aligned)
-                input_occupancy.append((grid > 0).astype(np.float32))
-
-                if j > 0:
-                    prev_scan_idx = i + (j - 1) * input_stride
-                    _prev_xyz_world, prev_trans, _prev_rot_yaw, prev_time_ns, prev_yaw = scans[prev_scan_idx]
-                    input_motion[j] = build_motion_features(
-                        curr_trans=trans,
-                        curr_rot_yaw=rot_yaw,
-                        curr_yaw=yaw,
-                        curr_time_ns=scan_t_ns,
-                        prev_trans=prev_trans,
-                        prev_yaw=prev_yaw,
-                        prev_time_ns=prev_time_ns,
-                    )
-
-            target_occupancy = []
-
-            for j in range(N_TARGET):
-                scan_idx = i + target_offset + j * target_stride
-                xyz_world, trans_j, _rot_yaw_j, _time_ns, _yaw = scans[scan_idx]
-                if mode == "map":
-                    # Anchor to last input frame position, keep north-up orientation
-                    xyz_frame = xyz_world - anchor_trans
-                else:
-                    xyz_frame = world_to_anchor_frame(xyz_world, anchor_trans, anchor_rot_yaw)
-                d2 = np.sum(xyz_frame[:, :2] ** 2, axis=1)
-                xyz_frame = xyz_frame[d2 <= (EGO_RADIUS_M * EGO_RADIUS_M)]
-                # Restore world-frame z so Z_RANGE is ground-relative, not sensor-relative
-                xyz_grid = xyz_frame.copy()
-                xyz_grid[:, 2] += anchor_trans[2]
-                grid = ego_scan_to_grid(xyz_grid, EGO_RADIUS_M, GRID_RES, Z_RANGE)
-                # Target robot offset from anchor in the grid's coordinate frame
-                ego_aligned = (mode == "ego")
-                if ego_aligned:
-                    robot_offset = (trans_j - anchor_trans) @ anchor_rot_yaw
-                else:
-                    robot_offset = trans_j - anchor_trans
-                apply_origin_crop(grid, robot_yaw=_yaw, ego_aligned=ego_aligned,
-                                  robot_xy_m=(float(robot_offset[0]), float(robot_offset[1])))
-                target_occupancy.append((grid > 0).astype(np.float32))
-
-            x_occ = np.stack(input_occupancy, axis=0)
-            x_delta = np.zeros_like(x_occ, dtype=np.float32)
-            x_delta[1:] = x_occ[1:] - x_occ[:-1]
-            x_grids = np.stack([x_occ, x_delta], axis=1).astype(np.float32)
-            y = np.stack(target_occupancy, axis=0)[:, None, :, :].astype(np.float32)
-
-            np.savez_compressed(
-                output_dir / f"set{set_idx:06d}.npz",
-                x_grids=x_grids,
-                x_motion=input_motion.astype(np.float32),
-                y=y,
-            )
-
-            if set_idx % 100 == 0:
-                print(f"  set {set_idx}/{n_sets}")
-            set_idx += 1
-
-    print(f"Done. Generated {set_idx} training sets in {output_dir}")
+    print(f"Done. Generated {n_sets} training sets in {output_dir}")
 
 
 def main():
@@ -551,4 +579,5 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("fork")
     main()
