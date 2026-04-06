@@ -156,28 +156,40 @@ def plot_comparison(all_results: dict, n_future: int, save_dir: str | None):
     n_ckpts = len(names)
     frames = np.arange(1, n_future + 1)
     width = 0.8 / n_ckpts
-    colors = plt.cm.tab10(np.linspace(0, 1, n_ckpts))
+    colors = plt.cm.viridis(np.linspace(0.1, 0.9, n_ckpts))
+
+    # Strip common prefix/suffix from checkpoint names for shorter legend labels.
+    if n_ckpts > 1:
+        prefix = os.path.commonprefix(names)
+        suffix = os.path.commonprefix([n[::-1] for n in names])[::-1]
+        short = [n[len(prefix):len(n) - len(suffix)] or n for n in names]
+        # Remove leading/trailing underscores
+        short = [s.strip("_") for s in short]
+    else:
+        short = names
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Checkpoint Comparison", fontsize=14)
+    fig.suptitle("Checkpoint Comparison", fontsize=14, y=0.99)
 
     titles = ["RMSE ↓", "IoU ↑", "Precision ↑", "Recall ↑"]
     keys = ["rmse", "iou", "precision", "recall"]
 
     for ax, title, key in zip(axes.flat, titles, keys):
-        for j, name in enumerate(names):
+        for j, (name, label) in enumerate(zip(names, short)):
             data = all_results[name][key]
             means = data.mean(axis=0)
             offset = (j - n_ckpts / 2 + 0.5) * width
-            ax.bar(frames + offset, means, width, label=name, color=colors[j], alpha=0.8)
+            ax.bar(frames + offset, means, width, label=label, color=colors[j], alpha=0.8)
 
         ax.set_xlabel("Future Frame")
         ax.set_ylabel(key.upper())
         ax.set_title(title)
         ax.set_xticks(frames)
-        ax.legend(fontsize=8)
 
-    plt.tight_layout()
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=min(n_ckpts, 5),
+               fontsize=9, bbox_to_anchor=(0.5, 0.96))
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
     if save_dir:
         path = os.path.join(save_dir, "benchmark_comparison.png")
         fig.savefig(path, dpi=150)

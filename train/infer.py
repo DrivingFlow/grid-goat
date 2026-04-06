@@ -18,7 +18,7 @@ import torch
 from GridFormer import GridFormer
 from MapDataset import MapDataset
 
-PIXEL_THRESHOLD = 0.5
+PIXEL_THRESHOLD = 0.9
 ENSEMBLE_TEMPERATURE = 3.0
 
 
