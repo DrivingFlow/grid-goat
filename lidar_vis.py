@@ -36,7 +36,7 @@ POSE_TOPIC = "/pcl_pose"
 EGO_RADIUS_M = 5.0
 PLAYBACK_SPEED = 4.0
 
-Z_RANGE = (0.1, 1.0)
+Z_RANGE = (0.1, 1.5)
 GRID_RES = 0.05
 
 ORIGIN_CROP_RADIUS = 0.20
@@ -477,6 +477,7 @@ def main():
                     break
                 vis.update_renderer()
 
+                print(f"\rFrame {frame}", end="", flush=True)
                 frame += 1
 
         print("Finished playback.")
