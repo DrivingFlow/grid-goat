@@ -3,7 +3,7 @@
 Generate training data for occupancy-grid prediction from a ROS2 bag.
 
 Usage:
-    python save_frame.py /path/to/bag_or_bags_folder [--mode {ego,map}] [--stride N] [--target-stride N] [--gap N]
+    python save_frame.py /path/to/bag_or_bags_folder [--mode {ego,map}] [--stride N] [--target-stride N] [--gap N] [--start N] [--end N]
 
 If the given path is a folder containing multiple bag sub-folders (i.e. no
 metadata.yaml and no .db3 files at the top level), each sub-folder is
@@ -43,7 +43,7 @@ TOPIC = "/livox/lidar"
 POSE_TOPIC = "/pcl_pose"
 EGO_RADIUS_M = 5.0
 
-Z_RANGE = (0.03, 0.6)
+Z_RANGE = (0.1, 1.5)
 GRID_RES = 0.05
 
 N_INPUT = 5
@@ -408,7 +408,8 @@ def _process_window(i):
     )
 
 
-def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int, gap: int):
+def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int, gap: int,
+                start: int = 0, end: int | None = None):
     """Process a single bag folder and save training data."""
     output_dir = Path("data") / mode / bag_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -486,6 +487,14 @@ def process_bag(bag_dir: Path, mode: str, input_stride: int, target_stride: int,
 
         print(f"Loaded {len(scans)} valid scans from {n_raw} messages.")
 
+        # Trim to requested frame range
+        total_scans = len(scans)
+        s = max(0, start)
+        e = min(total_scans, end) if end is not None else total_scans
+        if s > 0 or e < total_scans:
+            scans = scans[s:e]
+            print(f"Using frames {s}–{e-1} ({len(scans)} scans).")
+
         if len(scans) < window_size:
             print(f"Not enough scans ({len(scans)}) for window size {window_size}.", file=sys.stderr)
             sys.exit(1)
@@ -547,6 +556,18 @@ def main():
         default=0,
         help="Number of raw frames to skip between the last input and first target (default: 0).",
     )
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=0,
+        help="First scan index to use (default: 0).",
+    )
+    parser.add_argument(
+        "--end",
+        type=int,
+        default=None,
+        help="Last scan index (exclusive) to use (default: last scan).",
+    )
     args = parser.parse_args()
 
     bag_path = Path(args.bag).expanduser().resolve()
@@ -560,7 +581,7 @@ def main():
 
     if _is_bag_folder(bag_path):
         # Single bag
-        process_bag(bag_path, mode, input_stride, target_stride, gap)
+        process_bag(bag_path, mode, input_stride, target_stride, gap, args.start, args.end)
     elif bag_path.is_dir():
         # Parent folder containing multiple bags
         bag_dirs = sorted([d for d in bag_path.iterdir() if d.is_dir() and _is_bag_folder(d)])
@@ -572,7 +593,7 @@ def main():
             print(f"\n{'='*60}")
             print(f"[{idx}/{len(bag_dirs)}] Processing {bd.name}")
             print(f"{'='*60}")
-            process_bag(bd, mode, input_stride, target_stride, gap)
+            process_bag(bd, mode, input_stride, target_stride, gap, args.start, args.end)
     else:
         print(f"Not a directory: {bag_path}", file=sys.stderr)
         sys.exit(2)
