@@ -1,3 +1,16 @@
+"""
+Training script for the occupancy grid prediction model.
+
+It uses data produced by `save_frame.py` (.npz format containing spatial and motion data) to train 
+the GridFormer architecture.
+Features include:
+- Combined BCE, Dice, and motion-scaled L1 loss functions
+- AdamW optimization with Learning Rate warmup and Cosine Annealing
+- Dynamic Teacher Forcing scheduling during early epochs
+- WandB experiment tracking
+- Automatic early stopping and checkpoint management
+"""
+
 import math
 import os
 import sys
@@ -249,6 +262,7 @@ def train(n_epochs, data_roots, resume_from=None, ckpt_path=None, save_results=F
         train_motion_loss = 0.0
         teacher_forcing_ratio = TEACHER_FORCING_END
         if n_epochs > 1:
+            # Linearly decay teacher forcing ratio over the epochs
             progress = epoch / (n_epochs - 1)
             teacher_forcing_ratio = TEACHER_FORCING_START + progress * (TEACHER_FORCING_END - TEACHER_FORCING_START)
 
@@ -377,7 +391,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Expand parent directories into sub-folders containing .npz files
+    # Expand parent directories into sub-folders containing .npz files.
+    # This automatically supports merging datasets (via ConcatDataset) out of multiple sessions.
     expanded_roots = []
     for p in args.data:
         p = os.path.normpath(p)

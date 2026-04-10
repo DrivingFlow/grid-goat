@@ -14,7 +14,10 @@ Transform modes:
 Notes:
 - bag_folder should contain metadata.yaml and one or more *.db3 files (typical rosbag2).
 - Visualizes topic: /livox/lidar with pose from /pcl_pose.
-- Space to pause/resume, Q or Esc to quit.
+- Integrates OpenCV for 2D real-time occupancy grid rendering side-by-side with Open3D for 3D point cloud viewing.
+- Interactive shortcuts: 
+  - Space to pause/resume playback.
+  - Q or Esc to quit.
 """
 
 from __future__ import annotations

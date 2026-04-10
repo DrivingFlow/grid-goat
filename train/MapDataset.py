@@ -24,7 +24,7 @@ class MapDataset(Dataset):
         x_motion: (T, 2)        float32
         y:        (F, 1, H, W)  float32
 
-    Legacy format is still supported for existing PNG datasets:
+    Legacy format (maintained strictly for backwards compatibility with older validation sets):
 
         root/
           set000000_input0.png  ... set000000_input4.png

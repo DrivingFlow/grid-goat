@@ -32,12 +32,13 @@ class GridFormer(nn.Module):
     U-Net style CNN + Transformer encoder-decoder for occupancy grid prediction.
 
     CNN encoder downsamples each frame with skip connections saved at each level.
-    A transformer encoder-decoder processes the bottleneck tokens.  The CNN
-    decoder upsamples back to full resolution, concatenating skip features
-    (averaged across input timesteps) at each level for sharp reconstruction.
+    A transformer encoder-decoder processes the bottleneck tokens alongside injected
+    MLP-embedded motion features (forward speed, yaw rate). The CNN decoder 
+    upsamples back to full resolution, concatenating skip features (extracted from 
+    the final input timestep) at each level for sharp reconstruction.
 
     Input:  (B, T, 2, H, W)   -- T occupancy+delta grids
-            (B, T, 2)         -- per-frame motion metadata
+            (B, T, motion_dim) -- per-frame motion metadata
     Output: (B, F, 1, H, W)   -- F predicted occupancy grids
     """
 

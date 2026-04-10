@@ -2,8 +2,11 @@
 """
 Benchmark a trained GridFormer checkpoint on a held-out dataset.
 
-Reports per-frame RMSE, IoU, precision, recall and overall
-summary statistics.  Produces bar + box plots of per-frame metrics.
+Requires the dataset to be structured according to `MapDataset` (.npz format containing 
+`x_grids`, `x_motion`, and `y` tensors, or the legacy .png layout).
+
+Reports per-frame RMSE, IoU, precision, recall and overall summary statistics.  
+Produces bar + box plots of per-frame metrics.
 
 Usage:
   python train/benchmark.py --data data/ego/<folder> --ckpt train/ckpts/model.pth

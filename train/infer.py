@@ -2,6 +2,14 @@
 """
 Run inference on a dataset folder with a trained checkpoint and visualize outputs.
 
+Provides a multi-row view:
+- Row 1: Inputs
+- Row 2: Raw Probabilities
+- Row 3: Thresholded Detections
+- Row 4: Ground Truth
+- Row 5: Error Overlay (Green=TP, Red=FP, Blue=FN)
+Alongside a side-panel plotting an INFERNO colormapped Boltzmann-weighted ensemble.
+
 Usage:
   python infer.py --data /path/to/data_folder --ckpt /path/to/best_model.pth
 """
@@ -156,7 +164,9 @@ def main():
             row3 = np.hstack(row_gt)
             row4 = np.hstack(row_pred)
 
-            # Ensemble overlay: Boltzmann-weighted sum of thresholded predictions
+            # Ensemble overlay: Boltzmann-weighted sum of thresholded predictions.
+            # This generates a visually striking INFERNO heat-map representing the aggregation
+            # of occupancy over the prediction horizon, decaying weight further into the future.
             energies = np.arange(n_future, dtype=np.float64)
             log_weights = -energies / ENSEMBLE_TEMPERATURE
             log_weights -= log_weights.max()  # numerical stability

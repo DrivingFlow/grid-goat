@@ -400,6 +400,8 @@ def _process_window(i):
     x_grids = np.stack([x_occ, x_delta], axis=1).astype(np.float32)
     y = np.stack(target_occupancy, axis=0)[:, None, :, :].astype(np.float32)
 
+    # Save as .npz (replaces legacy single .png implementation)
+    # Packs together spatial input grids, temporal scalar motion details, and spatial targets
     np.savez_compressed(
         Path(output_dir) / f"set{i:06d}.npz",
         x_grids=x_grids,

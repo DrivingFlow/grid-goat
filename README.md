@@ -15,12 +15,12 @@ The pipeline has three stages:
 ```
 ├── save_frame.py              # Generate training data from ROS2 bags (ego or map mode)
 ├── lidar_vis.py               # Real-time LiDAR + occupancy grid playback viewer (ego or map mode)
-├── pcd_bag_conversion.py      # Bag → occupancy grid PNGs / video
 ├── train/
 │   ├── GridFormer.py          # U-Net CNN encoder-decoder + Transformer model
 │   ├── MapDataset.py          # PyTorch dataset for loading .npz training samples
 │   ├── train.py               # Training script (BCE + Dice loss, WandB logging)
-│   └── infer.py               # Inference visualization with ensemble overlays
+│   ├── infer.py               # Inference visualization with ensemble overlays
+│   └── benchmark.py           # Evaluation script for computing metrics and plotting results
 ├── data/
 │   ├── ego/                   # Training data in ego (anchor-relative) frame
 │   └── map/                   # Training data in map (rotation-only) frame
@@ -36,17 +36,20 @@ python save_frame.py /path/to/bag_folder
 
 # Map mode: each frame rotation-only, centered on its own sensor position
 python save_frame.py /path/to/bag_folder --mode map
+
+# Process with a custom stride and gap mapping
+python save_frame.py /path/to/bag_folder --stride 5 --target-stride 5 --gap 0
 ```
 
-Processes a ROS2 bag containing `/livox/lidar` (PointCloud2) and `/pcl_pose` topics. Uses a sliding window over consecutive scans (every 5th scan) to produce training samples.
+Processes a ROS2 bag containing `/livox/lidar` (PointCloud2) and `/pcl_pose` topics. Uses a sliding window over consecutive scans to produce training samples in an `.npz` format.
 
 **Transform modes:**
 - `ego` (default): each input frame is in its own yaw-aligned ego frame; target frames are re-projected into the last input frame's reference frame (anchor-centred, yaw-aligned). Output saved to `data/ego/<bag_name>/`.
 - `map`: same anchor-centred positioning as ego, but north-up (no yaw rotation applied). Input frames are centred on their own pose; target frames are centred on the anchor. Output saved to `data/map/<bag_name>/`.
 
 Each sample contains:
-- **Input**: 5 occupancy grids (201×201, 5cm resolution, 5m radius) with occupancy + delta channels, plus forward speed and yaw rate
-- **Target**: 5 future occupancy grids
+- **Input (`x_grids`, `x_motion`)**: 5 occupancy grids (201×201, 5cm resolution, 5m radius) with occupancy + delta channels, plus forward speed and yaw rate.
+- **Target (`y`)**: 5 future occupancy grids.
 
 ## Training
 
@@ -93,6 +96,22 @@ Displays a multi-row visualization:
 - **Side panels**: Boltzmann-weighted ensemble overlays for predictions and GT (INFERNO colormap)
 
 Navigate with arrow keys (left=previous, right=next, q=quit).
+
+## Benchmarking
+
+Evaluate model performance via quantitative metrics (RMSE, IoU, Precision, Recall). Provides terminal-level summary outputs and generates grouped bar chart representations comparing one or multiple checkpoints.
+
+```bash
+# Single checkpoint evaluation
+python train/benchmark.py --data data/ego/<folder> --ckpt train/ckpts/model.pth
+
+# Compare multiple checkpoints
+python train/benchmark.py --data data/ego/<folder> --ckpt train/ckpts/model_a.pth train/ckpts/model_b.pth
+
+# Compare checkpoints over different datasets
+python train/benchmark.py --data data/ego/<folder> data/map/<folder> --ckpt ego.pth map.pth
+```
+
 
 ## Visualization
 
