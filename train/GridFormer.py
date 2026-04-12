@@ -46,7 +46,7 @@ class GridFormer(nn.Module):
     def __init__(self, grid_h: int = 201, grid_w: int = 201,
                  d_model: int = 512, nhead: int = 8, num_layers: int = 4,
                  n_input: int = 5, n_target: int = 5,
-                 num_decoder_layers: int = 2,
+                 num_decoder_layers: int = 4, #this was 2
                  motion_dim: int = 2):
         super().__init__()
         self.grid_h = grid_h

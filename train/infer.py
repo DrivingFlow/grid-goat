@@ -1,39 +1,132 @@
 #!/usr/bin/env python3
 """
-Run inference on a dataset folder with a trained checkpoint and visualize outputs.
+Batch inference on the TEST split of a combined MapDataset (same recipe as train.py).
 
-Usage:
-  python infer.py --data /path/to/data_folder --ckpt /path/to/best_model.pth
+Merges all dataset subfolders under --data_dir (or uses the folder directly if it has set* files),
+applies 70/15/15 random_split with --seed, then runs GridFormer on the test portion only.
+
+Saves every --save_every-th example to --output_dir (default: ./inference_gridformer),
+with per-frame pred vs GT PNGs and a compressed npz (like infer_dogma_encoder_decoder_autoregressive.py).
+
+Usage (from grid-goat/train):
+  python infer.py --data_dir /path/to/ego_or_map_root --ckpt /path/to/grid_goat_model_ego.pth
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
-import argparse
-import time
+from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
-import cv2
 import torch
+from torch.utils.data import ConcatDataset, random_split
 
 from GridFormer import GridFormer
 from MapDataset import MapDataset
 
+# Reuse the same loss as training (occupancy + motion).
+from train import loss_fn
+
 PIXEL_THRESHOLD = 0.5
-ENSEMBLE_TEMPERATURE = 3.0
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Inference + visualization for occupancy grid prediction")
-    parser.add_argument("--data", required=True, help="Path to data folder (with set*.npz or set*_input*.png)")
-    parser.add_argument("--ckpt", required=True, help="Path to model checkpoint (.pth)")
-    parser.add_argument("--save", default=None, help="Optional directory to save output images (otherwise display only)")
+def _build_combined_dataset(data_root: str) -> MapDataset | ConcatDataset:
+    """
+    Compatible with training:
+    - If data_root contains set*.npz or set*_input0.png at top level, one MapDataset.
+    - Else concatenate every direct subfolder that has those files.
+    """
+    root = Path(data_root)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Data root not found: {root}")
+
+    has_set_files = any(root.glob("set*.npz")) or any(root.glob("set*_input0.png"))
+    if has_set_files:
+        print(f"Using single dataset folder: {root}")
+        return MapDataset(root=str(root), T=5, F=5)
+
+    subdirs = sorted(d for d in root.iterdir() if d.is_dir())
+    usable = [
+        d
+        for d in subdirs
+        if any(d.glob("set*.npz")) or any(d.glob("set*_input0.png"))
+    ]
+    if not usable:
+        raise FileNotFoundError(
+            f"No usable dataset folders under {root}. "
+            "Expected set*.npz or set*_input0.png in the root or subfolders."
+        )
+
+    print(f"Combining {len(usable)} dataset folders under: {root}")
+    for d in usable:
+        print("  -", d.name)
+    datasets = [MapDataset(root=str(d), T=5, F=5) for d in usable]
+    return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[2]
+    map_root = (repo_root / "../../../../../../bigdata/capstone25W1/grid_goat_train_new_v2/stride_2_skip_3/map").resolve()
+    models_root = (repo_root / "../../../../../../bigdata/capstone25W1/models").resolve()
+    default_ckpt = str((models_root / "grid_goat_model_map_new_stride2skip3_sticky0.5.pth").resolve())
+
+    parser = argparse.ArgumentParser(
+        description="GridFormer inference on test split of combined MapDataset (matches train.py)"
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=str(map_root),
+        help="Parent folder containing dataset subfolders (or one dataset folder with set* files)",
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default=default_ckpt,
+        help="Checkpoint from grid-goat/train/train.py (state_dict .pth)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="../../inference_gridformer_skiploss",
+        help="Directory under the current working directory to write example_* folders",
+    )
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=200,
+        help="Save visualization when the global test-sample index is a multiple of this (200 -> 200, 400, ...)",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Same as train.py random_split seed")
+    parser.add_argument(
+        "--skip-agg",
+        type=str,
+        default="last",
+        choices=("last", "mean", "mean_last"),
+        help=(
+            "Must match training: train.py uses last (default here). "
+            "train_f16.py defaults to mean_last — pass --skip-agg mean_last for those checkpoints."
+        ),
+    )
     args = parser.parse_args()
 
-    if not os.path.isdir(args.data):
-        print(f"Data folder not found: {args.data}", file=sys.stderr)
-        sys.exit(1)
-    if not os.path.isfile(args.ckpt):
-        print(f"Checkpoint not found: {args.ckpt}", file=sys.stderr)
+    data_dir = Path(args.data_dir).resolve()
+    ckpt_path = Path(args.ckpt).resolve()
+    output_dir = Path(args.output_dir)
+    if not output_dir.is_absolute():
+        output_dir = (Path.cwd() / output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not ckpt_path.is_file():
+        print(f"Checkpoint not found: {ckpt_path}", file=sys.stderr)
         sys.exit(1)
 
     if torch.cuda.is_available():
@@ -44,185 +137,98 @@ def main():
         device = "cpu"
     print(f"Device: {device}")
 
-    dataset = MapDataset(root=args.data, T=5, F=5)
-    print(f"Dataset: {len(dataset)} samples, grid {dataset.H}x{dataset.W}")
+    dataset = _build_combined_dataset(str(data_dir))
+    n = len(dataset)
+    n_train = int(0.7 * n)
+    n_val = int(0.15 * n)
+    n_test = n - n_train - n_val
+    _, _, test_ds = random_split(
+        dataset,
+        [n_train, n_val, n_test],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    print(f"Dataset size {n} -> test split size {len(test_ds)} (70/15/15, seed={args.seed})")
+
+    # grid size / motion from underlying dataset
+    if hasattr(dataset, "datasets"):
+        base = dataset.datasets[0]
+    else:
+        base = dataset
+    grid_h, grid_w = base.H, base.W
+    motion_dim = base.motion_dim
 
     model = GridFormer(
-        grid_h=dataset.H,
-        grid_w=dataset.W,
-        motion_dim=dataset.motion_dim,
+        grid_h=grid_h, grid_w=grid_w, motion_dim=motion_dim, skip_agg=args.skip_agg
     )
-    state = torch.load(args.ckpt, map_location="cpu")
+    state = torch.load(str(ckpt_path), map_location="cpu")
     model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    print(f"Loaded checkpoint: {args.ckpt}")
+    model = model.to(device).eval()
+    print(f"Loaded checkpoint: {ckpt_path}")
 
-    use_amp = device in ("cuda", "mps")
-    autocast_dtype = torch.float16 if device == "cuda" else torch.bfloat16
+    loader = torch.utils.data.DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=2,
+        pin_memory=(device == "cuda"),
+    )
 
-    if args.save:
-        os.makedirs(args.save, exist_ok=True)
+    test_loss = 0.0
+    example_counter = 0
 
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+    with torch.no_grad():
+        for X_grids, X_motion, Y in loader:
+            X_grids = X_grids.to(device)
+            X_motion = X_motion.to(device)
+            Y = Y.to(device)
+            X_occ = X_grids[:, :, :1]
 
-    cv2.namedWindow("Inference", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Inference", 1200, 800)
+            Y_pred = model(X_grids, X_motion)
+            Y_pred = Y_pred.float()
+            Y_f = Y.float()
+            X_occ_f = X_occ.float()
 
-    idx = 0
-    cache = {}  # idx -> canvas
+            batch_loss, _ = loss_fn(Y_pred, Y_f, X_occ_f, device, return_components=True)
+            test_loss += batch_loss.item()
 
-    while 0 <= idx < len(dataset):
-        if idx not in cache:
-            X_grids, X_motion, Y = dataset[idx]
-            X_grids = X_grids.unsqueeze(0).to(device)
-            X_motion = X_motion.unsqueeze(0).to(device)
+            B = X_grids.size(0)
+            gt_occ = Y[:, :, 0]
+            for i in range(B):
+                example_counter += 1
+                if example_counter % args.save_every != 0:
+                    continue
 
-            with torch.no_grad():
-                with torch.autocast(device, dtype=autocast_dtype, enabled=use_amp):
-                    t0 = time.perf_counter()
-                    Y_pred = model(X_grids, X_motion)
-                    if device == "mps":
-                        torch.mps.synchronize()
-                    elif device == "cuda":
-                        torch.cuda.synchronize()
-                    infer_ms = (time.perf_counter() - t0) * 1000
+                gt = gt_occ[i].cpu().float().numpy()
+                pred = Y_pred[i, :, 0].cpu().float().numpy()
+                pred_bin = (pred > PIXEL_THRESHOLD).astype(np.float32)
+                T = gt.shape[0]
 
-            pred_np = Y_pred[0].cpu().float().numpy()   # (F, 1, H, W)
-            true_np = Y.numpy()                          # (F, 1, H, W)
-            input_np = X_grids[0, :, 0].cpu().float().numpy()  # (T, H, W) occupancy channel
+                example_folder = output_dir / f"example_{example_counter:06d}"
+                example_folder.mkdir(parents=True, exist_ok=True)
 
-            n_input = input_np.shape[0]
-            n_future = pred_np.shape[0]
+                for t in range(T):
+                    fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+                    ax[0].imshow(pred_bin[t], cmap="gray", vmin=0, vmax=1)
+                    ax[0].set_title("Pred t+{}".format(t + 1))
+                    ax[0].axis("off")
+                    ax[1].imshow(gt[t], cmap="gray", vmin=0, vmax=1)
+                    ax[1].set_title("GT t+{}".format(t + 1))
+                    ax[1].axis("off")
+                    plt.tight_layout()
+                    plt.savefig(example_folder / f"frame_{t + 1:02d}.png", dpi=150)
+                    plt.close()
 
-            cell_h, cell_w = pred_np.shape[2], pred_np.shape[3]
-            n_cols = max(n_input, n_future)
+                np.savez_compressed(
+                    example_folder / "data.npz",
+                    pred=pred,
+                    gt=gt,
+                )
+                print(f"Saved {example_folder}")
 
-            row_input = []
-            for t in range(n_cols):
-                if t < n_input:
-                    frame = (input_np[t] * 255).astype(np.uint8)
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                else:
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                row_input.append(rgb)
-
-            row_raw = []
-            for f in range(n_cols):
-                if f < n_future:
-                    frame = (pred_np[f, 0] * 255).astype(np.uint8)
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                else:
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                row_raw.append(rgb)
-
-            row_thresh = []
-            for f in range(n_cols):
-                if f < n_future:
-                    frame = ((pred_np[f, 0] > PIXEL_THRESHOLD).astype(np.uint8) * 255)
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                else:
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                row_thresh.append(rgb)
-
-            row_gt = []
-            for f in range(n_cols):
-                if f < n_future:
-                    frame = (true_np[f, 0] * 255).astype(np.uint8)
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                else:
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                row_gt.append(rgb)
-
-            row_pred = []
-            for f in range(n_cols):
-                if f < n_future:
-                    gt_bin = (true_np[f, 0] > PIXEL_THRESHOLD).astype(np.uint8)
-                    pr_bin = (pred_np[f, 0] > PIXEL_THRESHOLD).astype(np.uint8)
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                    rgb[:, :, 1] = (gt_bin & pr_bin) * 255
-                    rgb[:, :, 2] = (pr_bin & ~gt_bin) * 255
-                    rgb[:, :, 0] = (gt_bin & ~pr_bin) * 255
-                else:
-                    rgb = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-                row_pred.append(rgb)
-
-            row1 = np.hstack(row_input)
-            row2 = np.hstack(row_raw)
-            row2t = np.hstack(row_thresh)
-            row3 = np.hstack(row_gt)
-            row4 = np.hstack(row_pred)
-
-            # Ensemble overlay: Boltzmann-weighted sum of thresholded predictions
-            energies = np.arange(n_future, dtype=np.float64)
-            log_weights = -energies / ENSEMBLE_TEMPERATURE
-            log_weights -= log_weights.max()  # numerical stability
-            weights = np.exp(log_weights)
-            weights /= weights.sum()
-
-            ensemble = np.zeros((cell_h, cell_w), dtype=np.float64)
-            for f in range(n_future):
-                binary = (pred_np[f, 0] > PIXEL_THRESHOLD).astype(np.float64)
-                ensemble += weights[f] * binary
-
-            ensemble_u8 = (ensemble * 255).clip(0, 255).astype(np.uint8)
-            ensemble_rgb = cv2.applyColorMap(ensemble_u8, cv2.COLORMAP_INFERNO)
-
-            # GT ensemble with same weights (GT is already binary 0/1)
-            gt_ensemble = np.zeros((cell_h, cell_w), dtype=np.float64)
-            for f in range(n_future):
-                gt_ensemble += weights[f] * true_np[f, 0].astype(np.float64)
-
-            gt_ensemble_u8 = (gt_ensemble * 255).clip(0, 255).astype(np.uint8)
-            gt_ensemble_rgb = cv2.applyColorMap(gt_ensemble_u8, cv2.COLORMAP_INFERNO)
-
-            # Build weight legend text
-            weight_strs = [f"f{f}:{weights[f]:.2f}" for f in range(n_future)]
-            legend = f"T={ENSEMBLE_TEMPERATURE}  " + "  ".join(weight_strs)
-
-            # Scale both ensembles to half the column height, keeping square
-            col_h = cell_h * 5
-            top_h = (col_h + 1) // 2
-            bot_h = col_h - top_h
-            ensemble_big = cv2.resize(ensemble_rgb, (top_h, top_h), interpolation=cv2.INTER_NEAREST)
-            gt_ensemble_big = cv2.resize(gt_ensemble_rgb, (top_h, bot_h), interpolation=cv2.INTER_NEAREST)
-
-            cv2.putText(ensemble_big, "Pred Overlay", (5, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-            cv2.putText(ensemble_big, legend, (5, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            cv2.putText(gt_ensemble_big, "GT Overlay", (5, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-
-            ensemble_col = np.vstack([ensemble_big, gt_ensemble_big])
-
-            canvas = np.hstack([np.vstack([row1, row2, row2t, row3, row4]), ensemble_col])
-
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            cv2.putText(canvas, "Input", (5, 20), font, 0.6, (255, 255, 255), 1)
-            cv2.putText(canvas, "Raw Prediction", (5, cell_h + 20), font, 0.6, (255, 255, 255), 1)
-            cv2.putText(canvas, "Thresholded Prediction", (5, 2 * cell_h + 20), font, 0.6, (255, 255, 255), 1)
-            cv2.putText(canvas, "Ground Truth", (5, 3 * cell_h + 20), font, 0.6, (255, 255, 255), 1)
-            cv2.putText(canvas, "Comparison (G=TP R=FP B=FN)", (5, 4 * cell_h + 20), font, 0.6, (255, 255, 255), 1)
-
-            cache[idx] = canvas
-            cache[(idx, 'ms')] = infer_ms
-
-            if args.save:
-                cv2.imwrite(os.path.join(args.save, f"sample_{idx:04d}.png"), canvas)
-
-        cv2.imshow("Inference", cache[idx])
-        print(f"Sample {idx+1}/{len(dataset)} | inference: {cache[(idx, 'ms')]:.1f} ms — right/any=next, left=prev, q=quit")
-        key = cv2.waitKey(0) & 0xFF
-        if key == ord('q') or key == 27:
-            break
-        elif key == 2 or key == 81:  # left arrow
-            idx = max(0, idx - 1)
-        else:
-            idx += 1
-
-    cv2.destroyAllWindows()
-    print("Done.")
+    test_loss /= max(1, len(loader))
+    print(f"Test loss (mean batch loss, same loss_fn as train): {test_loss:.5f}")
+    print(f"Outputs in {output_dir}")
 
 
 if __name__ == "__main__":
